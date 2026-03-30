@@ -10,11 +10,17 @@
     "query": "node src/index.js query",
     "pipeline": "node src/index.js pipeline"
   },
-  "keywords": ["semantic-compiler", "snowflake", "pinecone", "openai"],
+  "keywords": [
+    "semantic-compiler",
+    "snowflake",
+    "pinecone",
+    "openai"
+  ],
   "author": "",
   "license": "ISC",
   "description": "Semantic compiler: crawl warehouse topology, vectorize, query with natural language, generate + execute SQL.",
   "dependencies": {
+    "@google-cloud/bigquery": "^8.1.1",
     "@pinecone-database/pinecone": "^4",
     "dotenv": "^16",
     "openai": "^4",

@@ -8,7 +8,7 @@ const [,, command, ...rest] = process.argv;
 const question = rest.join(' ');
 
 async function runCrawl() {
-  console.log('\n⛏  Crawling Snowflake topology…');
+  console.log('\n⛏  Crawling warehouse topology…');
   const topology = await crawlTopology();
   return topology;
 }
@@ -52,6 +52,15 @@ async function runQuery(q) {
 
   console.log('\n⚡ Executing…');
   const results = await executeSQL(sql);
+
+  if (results.rows.length > 0) {
+    console.log('\n┌─── Raw row[0] ───');
+    for (const [k, v] of Object.entries(results.rows[0])) {
+      console.log(`│ ${k}: ${JSON.stringify(v)} (${typeof v})`);
+    }
+    console.log('└──────────────────');
+  }
+
   console.log(`\n${formatResults(results)}`);
 }
 
@@ -77,7 +86,7 @@ async function main() {
       break;
     default:
       console.log(`
-semantic-compiler — natural language → Snowflake SQL
+semantic-compiler — natural language → SQL (Snowflake / BigQuery)
 
 Commands:
   crawl                          Discover warehouse topology and save locally
@@ -86,11 +95,12 @@ Commands:
   pipeline "your question"       Full run: crawl → index → query
 
 Setup:
-  1. cp env.sample .env  (fill in credentials)
-  2. npm install
-  3. npm run crawl       (one-time topology scan)
-  4. npm run index       (one-time vectorization)
-  5. node src/index.js query "How many orders were placed last month?"
+  1. cp env.sample .env       (fill in credentials)
+  2. Set WAREHOUSE_TYPE=snowflake or WAREHOUSE_TYPE=bigquery
+  3. npm install
+  4. npm run crawl            (one-time topology scan)
+  5. npm run index            (one-time vectorization)
+  6. node src/index.js query "How many orders were placed last month?"
       `);
   }
 }

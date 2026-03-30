@@ -51,10 +51,12 @@ export async function indexTopology(topology) {
     topology = JSON.parse(raw);
   }
 
+  const namespace = topology.warehouseType || cfg.warehouseType;
   const openai = new OpenAI({ apiKey: cfg.openai.apiKey });
   const pc     = new Pinecone({ apiKey: cfg.pinecone.apiKey });
   await ensureIndex(pc, cfg);
-  const index  = pc.index(cfg.pinecone.indexName);
+  const index  = pc.index(cfg.pinecone.indexName).namespace(namespace);
+  console.log(`  namespace: ${namespace}`);
 
   const records = [];
   for (const db of topology.databases) {

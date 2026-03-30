@@ -30,7 +30,7 @@ function buildConnectionOptions(cfg) {
 }
 
 export function createConnection(overrides = {}) {
-  const cfg = getConfig().snowflake;
+  const cfg = getConfig().warehouse;
   const opts = { ...buildConnectionOptions(cfg), ...overrides };
 
   return new Promise((resolve, reject) => {

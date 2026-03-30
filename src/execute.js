@@ -1,10 +1,10 @@
-import { createConnection, execute, destroy } from './snowflake.js';
+import { getConfig } from './config.js';
 
-export async function executeSQL(sql) {
+async function executeSnowflake(sql) {
+  const { createConnection, execute, destroy } = await import('./snowflake.js');
   const conn = await createConnection();
   try {
     const rows = await execute(conn, sql);
-
     const columns = rows.length > 0 ? Object.keys(rows[0]) : [];
     return { columns, rows, rowCount: rows.length };
   } finally {
@@ -12,20 +12,48 @@ export async function executeSQL(sql) {
   }
 }
 
+async function executeBigQuery(sql) {
+  const { runQuery } = await import('./bigquery.js');
+  const rows = await runQuery(sql);
+  const columns = rows.length > 0 ? Object.keys(rows[0]) : [];
+  return { columns, rows, rowCount: rows.length };
+}
+
+export async function executeSQL(sql) {
+  const { warehouseType } = getConfig();
+  if (warehouseType === 'snowflake') return executeSnowflake(sql);
+  if (warehouseType === 'bigquery')  return executeBigQuery(sql);
+  throw new Error(`Unknown WAREHOUSE_TYPE: "${warehouseType}"`);
+}
+
 export function formatResults({ columns, rows, rowCount }) {
   if (rowCount === 0) {
     return '(no rows returned)';
   }
 
+  const scalar = (v) => {
+    if (v == null) return '';
+    if (typeof v === 'object' && v.value !== undefined) return String(v.value);
+    if (v instanceof Date) return v.toISOString();
+    return String(v);
+  };
+
   const widths = columns.map(col =>
-    Math.max(col.length, ...rows.map(r => String(r[col] ?? '').length))
+    Math.max(col.length, ...rows.map(r => scalar(r[col]).length))
   );
 
   const cap = 40;
   const capped = widths.map(w => Math.min(w, cap));
 
+  const fmt = (val) => {
+    if (val == null) return '';
+    if (typeof val === 'object' && val.value !== undefined) return String(val.value);
+    if (val instanceof Date) return val.toISOString();
+    return String(val);
+  };
+
   const pad = (val, i) => {
-    const s = String(val ?? '');
+    const s = fmt(val);
     return s.length > cap ? s.slice(0, cap - 1) + '…' : s.padEnd(capped[i]);
   };
 

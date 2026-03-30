@@ -1,29 +1,30 @@
-import { createConnection, execute, destroy } from './snowflake.js';
 import { getConfig } from './config.js';
 import { writeFileSync, mkdirSync } from 'fs';
 
-const SKIP_SCHEMAS = new Set(['INFORMATION_SCHEMA']);
-const SKIP_DBS = new Set(['SNOWFLAKE']);
+// ── Snowflake ────────────────────────────────────────────────────
 
-function parseDataType(raw) {
+const SF_SKIP_SCHEMAS = new Set(['INFORMATION_SCHEMA']);
+const SF_SKIP_DBS     = new Set(['SNOWFLAKE']);
+
+function sfParseDataType(raw) {
   if (typeof raw === 'string') {
     try { raw = JSON.parse(raw); } catch { return raw; }
   }
   if (typeof raw !== 'object' || !raw) return String(raw);
   const t = raw.type;
-  if (t === 'FIXED')  return `NUMBER(${raw.precision},${raw.scale})`;
-  if (t === 'TEXT')   return raw.length ? `VARCHAR(${raw.length})` : 'VARCHAR';
-  if (t === 'REAL')   return 'FLOAT';
+  if (t === 'FIXED') return `NUMBER(${raw.precision},${raw.scale})`;
+  if (t === 'TEXT')  return raw.length ? `VARCHAR(${raw.length})` : 'VARCHAR';
+  if (t === 'REAL')  return 'FLOAT';
   return t || 'UNKNOWN';
 }
 
-async function crawlColumns(conn, db, schema, objectName) {
+async function sfCrawlColumns(conn, execute, db, schema, obj) {
   const rows = await execute(conn,
-    `SHOW COLUMNS IN TABLE "${db}"."${schema}"."${objectName}"`
+    `SHOW COLUMNS IN TABLE "${db}"."${schema}"."${obj}"`
   );
   return rows.map(c => ({
     name:     c['column_name'],
-    type:     parseDataType(c['data_type']),
+    type:     sfParseDataType(c['data_type']),
     nullable: (() => {
       const dt = c['data_type'];
       if (typeof dt === 'string') {
@@ -35,21 +36,21 @@ async function crawlColumns(conn, db, schema, objectName) {
   }));
 }
 
-export async function crawlTopology() {
-  const cfg  = getConfig();
+async function crawlSnowflake(cfg) {
+  const { createConnection, execute, destroy } = await import('./snowflake.js');
   const conn = await createConnection();
 
   try {
     let databases;
-    if (cfg.crawl.databases?.length) {
-      databases = cfg.crawl.databases;
+    if (cfg.databases?.length) {
+      databases = cfg.databases;
     } else {
       const rows = await execute(conn, 'SHOW DATABASES');
-      databases = rows.map(r => r.name).filter(n => !SKIP_DBS.has(n));
+      databases = rows.map(r => r.name).filter(n => !SF_SKIP_DBS.has(n));
     }
 
     console.log(`  databases found: ${databases.length} → ${databases.join(', ')}`);
-    const topology = { databases: [], crawledAt: new Date().toISOString() };
+    const topology = { warehouseType: 'snowflake', databases: [], crawledAt: new Date().toISOString() };
 
     for (const db of databases) {
       console.log(`\n▸ ${db}`);
@@ -64,32 +65,23 @@ export async function crawlTopology() {
       }
 
       for (const s of schemas) {
-        if (SKIP_SCHEMAS.has(s.name)) continue;
+        if (SF_SKIP_SCHEMAS.has(s.name)) continue;
         console.log(`  ▸ ${s.name}`);
         const schemaEntry = { name: s.name, tables: [] };
 
-        const tables = await execute(conn,
-          `SHOW TABLES IN SCHEMA "${db}"."${s.name}"`
-        );
-
+        const tables = await execute(conn, `SHOW TABLES IN SCHEMA "${db}"."${s.name}"`);
         for (const t of tables) {
           console.log(`    ▸ ${t.name} (${t.rows ?? '?'} rows)`);
-          const cols = await crawlColumns(conn, db, s.name, t.name);
-          schemaEntry.tables.push({
-            name: t.name, kind: 'TABLE', rows: Number(t.rows) || 0, columns: cols,
-          });
+          const cols = await sfCrawlColumns(conn, execute, db, s.name, t.name);
+          schemaEntry.tables.push({ name: t.name, kind: 'TABLE', rows: Number(t.rows) || 0, columns: cols });
         }
 
         try {
-          const views = await execute(conn,
-            `SHOW VIEWS IN SCHEMA "${db}"."${s.name}"`
-          );
+          const views = await execute(conn, `SHOW VIEWS IN SCHEMA "${db}"."${s.name}"`);
           for (const v of views) {
             console.log(`    ▸ ${v.name} (view)`);
-            const cols = await crawlColumns(conn, db, s.name, v.name);
-            schemaEntry.tables.push({
-              name: v.name, kind: 'VIEW', rows: 0, columns: cols,
-            });
+            const cols = await sfCrawlColumns(conn, execute, db, s.name, v.name);
+            schemaEntry.tables.push({ name: v.name, kind: 'VIEW', rows: 0, columns: cols });
           }
         } catch { /* views may not be accessible */ }
 
@@ -97,15 +89,78 @@ export async function crawlTopology() {
       }
       topology.databases.push(dbEntry);
     }
-
-    mkdirSync('data', { recursive: true });
-    writeFileSync('data/topology.json', JSON.stringify(topology, null, 2));
-
-    const total = topology.databases
-      .flatMap(d => d.schemas).flatMap(s => s.tables).length;
-    console.log(`\n✓ Crawl complete — ${total} tables/views saved to data/topology.json`);
     return topology;
   } finally {
     await destroy(conn);
   }
+}
+
+// ── BigQuery ─────────────────────────────────────────────────────
+
+async function crawlBigQuery(cfg) {
+  const { getClient } = await import('./bigquery.js');
+  const bq = getClient();
+
+  let datasets;
+  if (cfg.datasets?.length) {
+    datasets = cfg.datasets.map(id => bq.dataset(id));
+  } else {
+    [datasets] = await bq.getDatasets();
+  }
+
+  console.log(`  datasets found: ${datasets.length} → ${datasets.map(d => d.id).join(', ')}`);
+  const topology = {
+    warehouseType: 'bigquery',
+    databases: [{ name: cfg.projectId, schemas: [] }],
+    crawledAt: new Date().toISOString(),
+  };
+  const project = topology.databases[0];
+
+  for (const ds of datasets) {
+    console.log(`\n▸ ${ds.id}`);
+    const schemaEntry = { name: ds.id, tables: [] };
+
+    const [tables] = await ds.getTables();
+    for (const tbl of tables) {
+      const [meta] = await tbl.getMetadata();
+      const kind = meta.type === 'VIEW' ? 'VIEW' : 'TABLE';
+      const rowCount = Number(meta.numRows) || 0;
+      console.log(`  ▸ ${tbl.id} (${kind}, ${rowCount} rows)`);
+
+      const columns = (meta.schema?.fields || []).map(f => ({
+        name:     f.name,
+        type:     f.type + (f.mode === 'REPEATED' ? ' ARRAY' : ''),
+        nullable: f.mode !== 'REQUIRED',
+        comment:  f.description || null,
+      }));
+
+      schemaEntry.tables.push({ name: tbl.id, kind, rows: rowCount, columns });
+    }
+    project.schemas.push(schemaEntry);
+  }
+
+  return topology;
+}
+
+// ── Dispatcher ───────────────────────────────────────────────────
+
+export async function crawlTopology() {
+  const cfg = getConfig();
+  const type = cfg.warehouseType;
+
+  let topology;
+  if (type === 'snowflake') {
+    topology = await crawlSnowflake(cfg.warehouse);
+  } else if (type === 'bigquery') {
+    topology = await crawlBigQuery(cfg.warehouse);
+  } else {
+    throw new Error(`Unknown WAREHOUSE_TYPE: "${type}"`);
+  }
+
+  mkdirSync('data', { recursive: true });
+  writeFileSync('data/topology.json', JSON.stringify(topology, null, 2));
+
+  const total = topology.databases.flatMap(d => d.schemas).flatMap(s => s.tables).length;
+  console.log(`\n✓ Crawl complete — ${total} tables/views saved to data/topology.json`);
+  return topology;
 }
