@@ -1,13 +1,23 @@
 {
-  "name": "@brnbco/vibe-code",
-  "version": "0.3.0",
+  "name": "@brnbco/semantic-compiler",
+  "version": "0.1.0",
+  "type": "module",
   "main": "src/index.js",
   "scripts": {
     "init:env": "cp env.sample .env",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "crawl": "node src/index.js crawl",
+    "index": "node src/index.js index",
+    "query": "node src/index.js query",
+    "pipeline": "node src/index.js pipeline"
   },
-  "keywords": [],
+  "keywords": ["semantic-compiler", "snowflake", "pinecone", "openai"],
   "author": "",
   "license": "ISC",
-  "description": ""
+  "description": "Semantic compiler: crawl warehouse topology, vectorize, query with natural language, generate + execute SQL.",
+  "dependencies": {
+    "@pinecone-database/pinecone": "^4",
+    "dotenv": "^16",
+    "openai": "^4",
+    "snowflake-sdk": "^2"
+  }
 }

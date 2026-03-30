@@ -1,4 +1,7 @@
 node_modules/
 dist/
 logs/
+data/
 .env
+*.p8
+*.pub
