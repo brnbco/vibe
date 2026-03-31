@@ -49,27 +49,12 @@ OUTPUT:
 Return ONLY the raw SQL query — no markdown fences, no explanation.
 If the question cannot be answered with the provided tables, start your response with "ERROR:" and explain what is missing.`;
 
-const METRIC_SYNONYMS = {
-  roas:       ['revenue','spend','cost','amount','purchase','conversion','value','spent','return'],
-  cpa:        ['cost','acquisition','purchase','spend','amount','spent','customer'],
-  cpc:        ['cost','click','spend','amount','spent'],
-  ctr:        ['click','impression','rate','through'],
-  revenue:    ['revenue','sales','purchase','conversion','value','total','amount','income'],
-  spend:      ['spend','cost','amount','budget','spent'],
-  conversion: ['conversion','purchase','lead','signup','checkout','acquisition','value'],
-};
-
 function tokenize(text) {
   return text.toLowerCase().replace(/[^a-z0-9]+/g, ' ').split(/\s+/).filter(t => t.length > 2);
 }
 
 function expandQueryTokens(tokens) {
-  const expanded = new Set(tokens);
-  for (const token of tokens) {
-    const synonyms = METRIC_SYNONYMS[token];
-    if (synonyms) synonyms.forEach(s => expanded.add(s));
-  }
-  return expanded;
+  return new Set(tokens);
 }
 
 function scoreColumn(colName, queryTokens) {
@@ -90,6 +75,11 @@ function isStructuralColumn(colName, colType) {
   return false;
 }
 
+function parseNonZeroRows(line) {
+  const m = line.match(/nonzero_rows=(\d+)/);
+  return m ? Number(m[1]) : 0;
+}
+
 function filterColumns(ddl, queryTokens) {
   const lines = ddl.split('\n');
   const header = lines.filter(l => !l.match(/^\s+-\s/));
@@ -97,21 +87,33 @@ function filterColumns(ddl, queryTokens) {
 
   if (colLines.length <= MAX_COLUMNS_PER_TABLE) return ddl;
 
-  const scored = colLines.map(line => {
+  const parsed = colLines.map(line => {
     const nameMatch = line.match(/^\s+-\s+(\S+)\s+\(([^)]+)\)/);
     const name = nameMatch?.[1] || '';
     const type = nameMatch?.[2]?.split(',')[0]?.trim() || '';
     const structural = isStructuralColumn(name, type);
     const hasSamples = line.includes(' e.g. ');
-    const relevance = scoreColumn(name, queryTokens) + (hasSamples ? 10 : 0);
-    return { line, name, structural, relevance };
+    const keywordScore = scoreColumn(name, queryTokens) + (hasSamples ? 10 : 0);
+    const dataVolume = parseNonZeroRows(line);
+    return { line, name, structural, keywordScore, dataVolume };
   });
 
-  const structural = scored.filter(s => s.structural);
-  const rest = scored.filter(s => !s.structural).sort((a, b) => b.relevance - a.relevance);
+  const structural = parsed.filter(s => s.structural);
+  const nonStructural = parsed.filter(s => !s.structural);
 
-  const budget = MAX_COLUMNS_PER_TABLE - structural.length;
-  const selected = [...structural, ...rest.slice(0, Math.max(budget, 0))];
+  const KEYWORD_SLOTS = 15;
+  const DATA_SLOTS = MAX_COLUMNS_PER_TABLE - structural.length - KEYWORD_SLOTS;
+
+  const byKeyword = [...nonStructural].sort((a, b) => b.keywordScore - a.keywordScore);
+  const keywordPicks = byKeyword.slice(0, Math.max(KEYWORD_SLOTS, 0));
+  const keywordNames = new Set(keywordPicks.map(p => p.name));
+
+  const byDataVolume = nonStructural
+    .filter(p => !keywordNames.has(p.name))
+    .sort((a, b) => b.dataVolume - a.dataVolume);
+  const dataPicks = byDataVolume.slice(0, Math.max(DATA_SLOTS, 0));
+
+  const selected = [...structural, ...keywordPicks, ...dataPicks];
   const omitted = colLines.length - selected.length;
 
   const filteredDDL = [...header, ...selected.map(s => s.line)].join('\n');
