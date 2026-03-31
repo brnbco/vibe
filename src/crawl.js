@@ -83,26 +83,46 @@ async function sfProfileTable(conn, execute, fqn, columns) {
 
 async function sfProfileStrings(conn, execute, fqn, columns) {
   const dateCol = findDateColumn(columns);
-  const strCols = columns.filter(c => isStringLike(c.type)).slice(0, 10);
+  const strCols = columns.filter(c => isStringLike(c.type));
   if (strCols.length === 0) return {};
 
-  const exprs = strCols.map(c =>
-    `MAX("${c.name}") AS "${c.name}__sample"`
-  ).join(', ');
-
   const dateFilter = dateCol
-    ? `WHERE "${dateCol.name}" >= DATEADD(day, -7, CURRENT_DATE())`
+    ? `WHERE "${dateCol.name}" >= DATEADD(day, -30, CURRENT_DATE())`
     : '';
 
-  try {
-    const [row] = await execute(conn, `SELECT ${exprs} FROM ${fqn} ${dateFilter}`);
-    const profile = {};
-    for (const c of strCols) {
-      const v = row?.[`${c.name}__sample`];
-      if (v) profile[c.name] = [String(v)];
-    }
-    return profile;
-  } catch { return {}; }
+  const profile = {};
+  for (let i = 0; i < strCols.length; i += PROFILE_BATCH) {
+    const batch = strCols.slice(i, i + PROFILE_BATCH);
+    const exprs = batch.flatMap(c => [
+      `COUNT("${c.name}") AS "${c.name}__nn"`,
+      `MAX("${c.name}") AS "${c.name}__sample"`,
+      `COUNT(DISTINCT "${c.name}") AS "${c.name}__nuniq"`,
+    ]).join(', ');
+
+    try {
+      const [row] = await execute(conn, `SELECT ${exprs} FROM ${fqn} ${dateFilter}`);
+      for (const c of batch) {
+        const nn = Number(row?.[`${c.name}__nn`]) || 0;
+        const nuniq = Number(row?.[`${c.name}__nuniq`]) || 0;
+        const v = row?.[`${c.name}__sample`];
+        if (nn > 0 && v) profile[c.name] = { nonNullCount: nn, distinctCount: nuniq, sample: String(v) };
+      }
+    } catch { /* skip batch */ }
+  }
+  return profile;
+}
+
+async function sfFetchDistinctValues(conn, execute, fqn, stringProfile) {
+  const lowCard = Object.entries(stringProfile)
+    .filter(([, v]) => v.distinctCount > 0 && v.distinctCount <= LOW_CARDINALITY_THRESHOLD);
+  for (const [colName] of lowCard) {
+    try {
+      const rows = await execute(conn,
+        `SELECT DISTINCT "${colName}" AS val FROM ${fqn} WHERE "${colName}" IS NOT NULL ORDER BY 1 LIMIT ${LOW_CARDINALITY_THRESHOLD}`
+      );
+      stringProfile[colName].distinctValues = rows.map(r => String(r.val)).filter(Boolean);
+    } catch { /* skip */ }
+  }
 }
 
 async function sfGetDateRange(conn, execute, fqn, dateCol) {
@@ -115,17 +135,25 @@ async function sfGetDateRange(conn, execute, fqn, dateCol) {
   } catch { return null; }
 }
 
+const LOW_CARDINALITY_THRESHOLD = 20;
+
 function buildSamples(columns, numericProfile, stringProfile, dateRange, dateCol) {
   const samples = {};
   for (const c of columns) {
     const np = numericProfile[c.name];
     if (np) {
-      const avg = np.nonZeroCount > 0 ? (np.sum / np.nonZeroCount).toFixed(2) : null;
       samples[c.name] = [`sum=${np.sum}`, `nonzero_rows=${np.nonZeroCount}`, `max=${np.max}`];
       continue;
     }
     const sp = stringProfile[c.name];
-    if (sp) { samples[c.name] = sp; continue; }
+    if (sp) {
+      if (sp.distinctValues?.length) {
+        samples[c.name] = [`nonnull_rows=${sp.nonNullCount}`, `values: ${sp.distinctValues.join(' | ')}`];
+      } else {
+        samples[c.name] = [`nonnull_rows=${sp.nonNullCount}`, `distinct=${sp.distinctCount}`, `e.g. ${sp.sample}`];
+      }
+      continue;
+    }
     if (dateCol && c.name === dateCol.name && dateRange) {
       samples[c.name] = [`range: ${dateRange.min} to ${dateRange.max}`];
     }
@@ -178,6 +206,7 @@ async function crawlSnowflake(cfg) {
             sfProfileStrings(conn, execute, fqn, cols),
             sfGetDateRange(conn, execute, fqn, dateCol),
           ]);
+          await sfFetchDistinctValues(conn, execute, fqn, strP);
           const samples = buildSamples(cols, numP, strP, dr, dateCol);
           schemaEntry.tables.push({
             name: t.name, kind: 'TABLE', rows: Number(t.rows) || 0,
@@ -198,6 +227,7 @@ async function crawlSnowflake(cfg) {
               sfProfileStrings(conn, execute, fqn, cols),
               sfGetDateRange(conn, execute, fqn, dateCol),
             ]);
+            await sfFetchDistinctValues(conn, execute, fqn, strP);
             const samples = buildSamples(cols, numP, strP, dr, dateCol);
             schemaEntry.tables.push({
               name: v.name, kind: 'VIEW', rows: 0,
@@ -253,31 +283,52 @@ async function bqProfileTable(bq, fqn, columns) {
 
 async function bqProfileStrings(bq, fqn, columns) {
   const dateCol = findDateColumn(columns);
-  const strCols = columns.filter(c => isStringLike(c.type)).slice(0, 10);
+  const strCols = columns.filter(c => isStringLike(c.type));
   if (strCols.length === 0) return {};
 
-  const exprs = strCols.map(c =>
-    `MAX(\`${c.name}\`) AS \`${c.name}__sample\``
-  ).join(', ');
-
   const dateFilter = dateCol
-    ? `WHERE \`${dateCol.name}\` >= DATE_SUB(CURRENT_DATE(), INTERVAL 7 DAY)`
+    ? `WHERE \`${dateCol.name}\` >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY)`
     : '';
 
-  try {
-    const [rows] = await bq.query({
-      query: `SELECT ${exprs} FROM \`${fqn}\` ${dateFilter}`,
-      useLegacySql: false,
-    });
-    const row = rows[0];
-    const profile = {};
-    for (const c of strCols) {
-      let v = row?.[`${c.name}__sample`];
-      if (v && typeof v === 'object' && v.value !== undefined) v = String(v.value);
-      if (v) profile[c.name] = [String(v)];
-    }
-    return profile;
-  } catch { return {}; }
+  const profile = {};
+  for (let i = 0; i < strCols.length; i += PROFILE_BATCH) {
+    const batch = strCols.slice(i, i + PROFILE_BATCH);
+    const exprs = batch.flatMap(c => [
+      `COUNTIF(\`${c.name}\` IS NOT NULL) AS \`${c.name}__nn\``,
+      `MAX(\`${c.name}\`) AS \`${c.name}__sample\``,
+      `COUNT(DISTINCT \`${c.name}\`) AS \`${c.name}__nuniq\``,
+    ]).join(', ');
+
+    try {
+      const [rows] = await bq.query({
+        query: `SELECT ${exprs} FROM \`${fqn}\` ${dateFilter}`,
+        useLegacySql: false,
+      });
+      const row = rows[0];
+      for (const c of batch) {
+        const nn = Number(row?.[`${c.name}__nn`]) || 0;
+        const nuniq = Number(row?.[`${c.name}__nuniq`]) || 0;
+        let v = row?.[`${c.name}__sample`];
+        if (v && typeof v === 'object' && v.value !== undefined) v = String(v.value);
+        if (nn > 0 && v) profile[c.name] = { nonNullCount: nn, distinctCount: nuniq, sample: String(v) };
+      }
+    } catch { /* skip batch */ }
+  }
+  return profile;
+}
+
+async function bqFetchDistinctValues(bq, fqn, stringProfile) {
+  const lowCard = Object.entries(stringProfile)
+    .filter(([, v]) => v.distinctCount > 0 && v.distinctCount <= LOW_CARDINALITY_THRESHOLD);
+  for (const [colName] of lowCard) {
+    try {
+      const [rows] = await bq.query({
+        query: `SELECT DISTINCT \`${colName}\` AS val FROM \`${fqn}\` WHERE \`${colName}\` IS NOT NULL ORDER BY 1 LIMIT ${LOW_CARDINALITY_THRESHOLD}`,
+        useLegacySql: false,
+      });
+      stringProfile[colName].distinctValues = rows.map(r => String(r.val)).filter(Boolean);
+    } catch { /* skip */ }
+  }
 }
 
 async function bqGetDateRange(bq, fqn, dateCol) {
@@ -373,6 +424,7 @@ async function crawlBigQuery(cfg) {
         bqGetDateRange(bq, fqn, dateCol),
       ]);
 
+      await bqFetchDistinctValues(bq, fqn, strP);
       const samples = buildSamples(columns, numericProfile, strP, dr, dateCol);
 
       schemaEntry.tables.push({

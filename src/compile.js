@@ -1,7 +1,7 @@
 import OpenAI from 'openai';
 import { getConfig } from './config.js';
 
-const MAX_COLUMNS_PER_TABLE = 25;
+const MAX_COLUMNS_PER_TABLE = 30;
 
 const DIALECT_HINTS = {
   snowflake: `TARGET DIALECT: Snowflake SQL
@@ -53,15 +53,27 @@ function tokenize(text) {
   return text.toLowerCase().replace(/[^a-z0-9]+/g, ' ').split(/\s+/).filter(t => t.length > 2);
 }
 
+function stem(token) {
+  if (token.length > 4 && token.endsWith('s')) return token.slice(0, -1);
+  if (token.length > 5 && token.endsWith('ing')) return token.slice(0, -3);
+  if (token.length > 4 && token.endsWith('ed')) return token.slice(0, -2);
+  return token;
+}
+
 function expandQueryTokens(tokens) {
-  return new Set(tokens);
+  const expanded = new Set();
+  for (const t of tokens) {
+    expanded.add(t);
+    expanded.add(stem(t));
+  }
+  return expanded;
 }
 
 function scoreColumn(colName, queryTokens) {
   const colTokens = tokenize(colName);
   let score = 0;
   for (const ct of colTokens) {
-    if (queryTokens.has(ct)) score++;
+    if (queryTokens.has(ct) || queryTokens.has(stem(ct))) score++;
   }
   return score;
 }
@@ -75,9 +87,12 @@ function isStructuralColumn(colName, colType) {
   return false;
 }
 
-function parseNonZeroRows(line) {
-  const m = line.match(/nonzero_rows=(\d+)/);
-  return m ? Number(m[1]) : 0;
+function parseDataVolume(line) {
+  const nzr = line.match(/nonzero_rows=(\d+)/);
+  if (nzr) return Number(nzr[1]);
+  const nnr = line.match(/nonnull_rows=(\d+)/);
+  if (nnr) return Number(nnr[1]);
+  return 0;
 }
 
 function filterColumns(ddl, queryTokens) {
@@ -92,26 +107,33 @@ function filterColumns(ddl, queryTokens) {
     const name = nameMatch?.[1] || '';
     const type = nameMatch?.[2]?.split(',')[0]?.trim() || '';
     const structural = isStructuralColumn(name, type);
-    const hasSamples = line.includes(' e.g. ');
-    const keywordScore = scoreColumn(name, queryTokens) + (hasSamples ? 10 : 0);
-    const dataVolume = parseNonZeroRows(line);
-    return { line, name, structural, keywordScore, dataVolume };
+    const isNumCol = /nonzero_rows=\d/.test(line);
+    const hasData = isNumCol || /nonnull_rows=\d/.test(line);
+    const keywordScore = scoreColumn(name, queryTokens) + (hasData ? 3 : 0);
+    const dataVolume = parseDataVolume(line);
+    return { line, name, structural, keywordScore, dataVolume, isNumCol };
   });
 
   const structural = parsed.filter(s => s.structural);
   const nonStructural = parsed.filter(s => !s.structural);
 
   const KEYWORD_SLOTS = 15;
-  const DATA_SLOTS = MAX_COLUMNS_PER_TABLE - structural.length - KEYWORD_SLOTS;
+  const remaining = Math.max(MAX_COLUMNS_PER_TABLE - structural.length - KEYWORD_SLOTS, 0);
+  const NUM_DATA_SLOTS = Math.ceil(remaining * 0.7);
+  const STR_DATA_SLOTS = remaining - NUM_DATA_SLOTS;
 
   const byKeyword = [...nonStructural].sort((a, b) => b.keywordScore - a.keywordScore);
   const keywordPicks = byKeyword.slice(0, Math.max(KEYWORD_SLOTS, 0));
   const keywordNames = new Set(keywordPicks.map(p => p.name));
 
-  const byDataVolume = nonStructural
-    .filter(p => !keywordNames.has(p.name))
-    .sort((a, b) => b.dataVolume - a.dataVolume);
-  const dataPicks = byDataVolume.slice(0, Math.max(DATA_SLOTS, 0));
+  const leftover = nonStructural.filter(p => !keywordNames.has(p.name));
+  const numLeftover = leftover.filter(p => p.isNumCol).sort((a, b) => b.dataVolume - a.dataVolume);
+  const strLeftover = leftover.filter(p => !p.isNumCol).sort((a, b) => b.dataVolume - a.dataVolume);
+
+  const dataPicks = [
+    ...numLeftover.slice(0, NUM_DATA_SLOTS),
+    ...strLeftover.slice(0, STR_DATA_SLOTS),
+  ];
 
   const selected = [...structural, ...keywordPicks, ...dataPicks];
   const omitted = colLines.length - selected.length;

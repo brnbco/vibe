@@ -12,12 +12,16 @@
     "query": "breakdown ad spend by channel for last 7 days and Shopify first time customers for oats overnight"
   },
   {
-    "id": "oats-efg-roas",
+    "id": "oats-efg-cac",
     "query": "oats Shopify first times sales and calculate cac using all oats ad spend last 7 days group by platform pacific time"
   },
   {
-    "id": "oats-efg-roas",
+    "id": "oats-hij-cac",
     "query": "oats Shopify tiktok google first times sales and calculate cac using all oats ad spend last 7 days pacific time"
+  },
+  {
+    "id": "oats-klm-cac",
+    "query": "oats shopify first time sales and calculate cac using all oats ad spend last 7 days pacific time"
   },
   {
     "id": "kut-fb-cpa",
