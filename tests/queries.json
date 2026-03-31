@@ -1,0 +1,62 @@
+[
+  {
+    "id": "oats-fb-cpa",
+    "query": "oats overnight facebook first time customer CPA, pacific time zone, from march 1 to 7 2026. list each day: day, spend, first time customers, cpa"
+  },
+  {
+    "id": "oats-fb-roas",
+    "query": "oats overnight facebook roas, march 24 to 30 2026, pacific time. list each day: day, value."
+  },
+  {
+    "id": "oats-abc-cpa",
+    "query": "breakdown ad spend by channel for last 7 days and Shopify first time customers for oats overnight"
+  },
+  {
+    "id": "oats-efg-roas",
+    "query": "oats Shopify first times sales and calculate cac using all oats ad spend last 7 days group by platform pacific time"
+  },
+  {
+    "id": "oats-efg-roas",
+    "query": "oats Shopify tiktok google first times sales and calculate cac using all oats ad spend last 7 days pacific time"
+  },
+  {
+    "id": "kut-fb-cpa",
+    "query": "kut from the kloth facebook first time customer CPA, pacific time zone, from march 1 to 7 2026. list each day: day, spend, first time customers, cpa"
+  },
+  {
+    "id": "kut-fb-roas",
+    "query": "kut from the kloth facebook, roas march 24 to 30 2026, pacific time. list each day: day, value."
+  },
+  {
+    "id": "jaanuu-fb-cpa",
+    "query": "jaanuu facebook first time customer CPA, pacific time zone, from march 1 to 7 2026. list each day: day, spend, first time customers, cpa"
+  },
+  {
+    "id": "jaanuu-fb-roas",
+    "query": "jaanuu facebook, roas march 24 to 30 2026, pacific time. list each day: day, value."
+  },
+  {
+    "id": "hop-wtr-shopify-revenue",
+    "query": "hop wtr total shopify revenue and order count by day, last 7 days excluding today march 31 2026 pacific time"
+  },
+  {
+    "id": "reliefband-fb-vs-google-spend",
+    "query": "reliefband facebook spend vs google spend by day, march 1 to 14 2026. show day, facebook_spend, google_spend, total_spend"
+  },
+  {
+    "id": "caddis-top-campaigns",
+    "query": "caddis facebook top 5 campaigns by spend in march 2026. show campaign name, total spend, total purchases, roas"
+  },
+  {
+    "id": "felina-shopify-aov",
+    "query": "felina average order value from shopify, weekly for the last 4 weeks ending march 30 2026. show week start date, orders, total revenue, aov"
+  },
+  {
+    "id": "casper-fb-ctr-cpc",
+    "query": "casper facebook CTR and CPC by day, march 20 to 30 2026. show day, impressions, clicks, ctr, cpc, spend"
+  },
+  {
+    "id": "fb-ad-spend",
+    "query": "facebook spend last 7 days, pacific time"
+  }
+]

@@ -8,7 +8,9 @@
     "crawl": "node src/index.js crawl",
     "index": "node src/index.js index",
     "query": "node src/index.js query",
-    "pipeline": "node src/index.js pipeline"
+    "pipeline": "node src/index.js pipeline",
+    "test": "node tests/runner.js",
+    "test:watch": "node tests/runner.js --watch"
   },
   "keywords": [
     "semantic-compiler",

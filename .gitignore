@@ -5,4 +5,5 @@ data/
 .env
 *.p8
 *.pub
+tests/last-run.json
 brandco-459218-b09c059b43b7.json
