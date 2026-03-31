@@ -25,7 +25,8 @@ export async function searchOntology(query, topK = DEFAULT_TOP_K) {
   const cfg    = getConfig();
   const openai = new OpenAI({ apiKey: cfg.openai.apiKey });
   const pc     = new Pinecone({ apiKey: cfg.pinecone.apiKey });
-  const index  = pc.index(cfg.pinecone.indexName).namespace(cfg.warehouseType);
+  const namespace = cfg.pinecone.namespace || cfg.warehouseType;
+  const index  = pc.index(cfg.pinecone.indexName).namespace(namespace);
 
   const resp = await openai.embeddings.create({
     model: cfg.openai.embedModel,

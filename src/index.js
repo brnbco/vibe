@@ -1,7 +1,7 @@
 import { crawlTopology } from './crawl.js';
 import { indexTopology } from './embed.js';
 import { searchOntology } from './search.js';
-import { compileSQL } from './compile.js';
+import { compileSQL, recompileSQL, buildCompilerContext } from './compile.js';
 import { executeSQL, formatResults } from './execute.js';
 
 const [,, command, ...rest] = process.argv;
@@ -37,21 +37,39 @@ async function runQuery(q) {
     console.log(`    ${m.id}  (score: ${m.score.toFixed(3)}, ${m.kind})`);
   }
 
-  console.log('\n┌─── Ontology Context (sent to compiler) ───');
-  for (const m of matches) {
-    console.log(`│`);
-    m.ddl.split('\n').forEach(l => console.log(`│ ${l}`));
+  const compilerCtx = buildCompilerContext(q, matches);
+  console.log('\n┌─── Compiler Context (filtered) ───');
+  compilerCtx.split('\n').forEach(l => console.log(`│ ${l}`));
+  console.log(`└───────────────────────────────────`);
+
+  const MAX_RETRIES = 2;
+  let sql = null;
+  let results = null;
+  let lastError = null;
+
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    if (attempt === 0) {
+      console.log('\n🔧 Compiling SQL…');
+      sql = await compileSQL(q, matches);
+    } else {
+      console.log(`\n🔧 Recompiling (attempt ${attempt + 1}/${MAX_RETRIES + 1}) — fixing: ${lastError}`);
+      sql = await recompileSQL(q, matches, sql, lastError);
+    }
+
+    console.log(`\n┌─── Generated SQL ───`);
+    console.log(sql.split('\n').map(l => `│ ${l}`).join('\n'));
+    console.log(`└─────────────────────`);
+
+    console.log('\n⚡ Executing…');
+    try {
+      results = await executeSQL(sql);
+      break;
+    } catch (err) {
+      lastError = err.message;
+      if (attempt === MAX_RETRIES) throw err;
+      console.log(`  ✗ ${lastError}`);
+    }
   }
-  console.log(`└────────────────────────────────────────────`);
-
-  console.log('\n🔧 Compiling SQL…');
-  const sql = await compileSQL(q, matches);
-  console.log(`\n┌─── Generated SQL ───`);
-  console.log(sql.split('\n').map(l => `│ ${l}`).join('\n'));
-  console.log(`└─────────────────────`);
-
-  console.log('\n⚡ Executing…');
-  const results = await executeSQL(sql);
 
   if (results.rows.length > 0) {
     console.log('\n┌─── Raw row[0] ───');

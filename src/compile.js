@@ -1,6 +1,8 @@
 import OpenAI from 'openai';
 import { getConfig } from './config.js';
 
+const MAX_COLUMNS_PER_TABLE = 25;
+
 const DIALECT_HINTS = {
   snowflake: `TARGET DIALECT: Snowflake SQL
 - Use fully qualified names: DATABASE.SCHEMA.TABLE_NAME
@@ -22,49 +24,119 @@ You receive an ONTOLOGY CONTEXT — table definitions from a data warehouse. Eac
 
 ${DIALECT_HINTS[dialect] || ''}
 
-CRITICAL — COLUMN SCOPING:
-- Each table section lists its EXACT columns. A column from Table A MUST NOT be used with Table B.
+CRITICAL — COLUMN-TABLE BINDING:
+- Each table lists ONLY its own columns. A column listed under Table A DOES NOT EXIST in Table B.
+- In a SELECT ... FROM tableX, every column in that SELECT must be from tableX's column list.
+- If you need data from multiple tables, use JOIN (on shared key columns) or UNION ALL (for combining similar rows). NEVER put a column from one table into a SELECT from a different table.
 - Copy column names EXACTLY as listed. Character-for-character. NEVER abbreviate, invent, or paraphrase.
-- When multiple columns look similar, pick the one whose name best matches the user's intent.
-- If unsure, prefer the most specific column name (e.g. "Website_Purchases_Conversion_Value__X" over "Conversion_Value__X" for website purchase revenue).
+
+SAMPLE DATA:
+- Some columns include sample values (e.g. "e.g. 142.50, 87.30"). Use these to understand what each column represents.
+- Columns without sample values may be mostly NULL — prefer columns that show sample data.
+- Use sample values to infer units, data types, and what the column measures (counts vs. dollar amounts vs. IDs, etc.).
+- When sample data shows the SAME date repeated (e.g. "2026-03-30, 2026-03-30, 2026-03-30"), the table has multiple rows per date. You MUST use GROUP BY date with SUM/COUNT/AVG when computing per-day metrics.
 
 RULES:
 1. Use ONLY the tables and columns present in the ontology context.
 2. Always use fully qualified table names.
 3. Generate ONLY SELECT statements — never mutate data.
-4. Infer JOIN conditions from matching column names, types, and naming conventions.
-5. Apply appropriate aggregations, filters, GROUP BY, and ORDER BY based on the question.
-6. When relationships are ambiguous, prefer joins on identically named columns.
+4. Before writing SQL, mentally verify: for every column reference, is it listed under the table in the FROM/JOIN clause?
+5. Infer JOIN conditions from matching column names, types, and naming conventions.
+6. When computing metrics (ROAS, CPA, CTR, totals, averages), ALWAYS use SUM/COUNT/AVG with GROUP BY — raw tables almost always have multiple rows per date/entity.
 7. Format the SQL cleanly.
 
 OUTPUT:
 Return ONLY the raw SQL query — no markdown fences, no explanation.
 If the question cannot be answered with the provided tables, start your response with "ERROR:" and explain what is missing.`;
 
-function buildTableContext(match) {
-  const header = `TABLE: ${match.id} [${match.kind}, relevance: ${match.score.toFixed(3)}]`;
-  const cols = match.ddl.split('\n').filter(l => l.match(/^\s+-\s/));
-  return `${header}\nVALID COLUMNS (use ONLY these with this table):\n${cols.join('\n')}`;
+const METRIC_SYNONYMS = {
+  roas:       ['revenue','spend','cost','amount','purchase','conversion','value','spent','return'],
+  cpa:        ['cost','acquisition','purchase','spend','amount','spent','customer'],
+  cpc:        ['cost','click','spend','amount','spent'],
+  ctr:        ['click','impression','rate','through'],
+  revenue:    ['revenue','sales','purchase','conversion','value','total','amount','income'],
+  spend:      ['spend','cost','amount','budget','spent'],
+  conversion: ['conversion','purchase','lead','signup','checkout','acquisition','value'],
+};
+
+function tokenize(text) {
+  return text.toLowerCase().replace(/[^a-z0-9]+/g, ' ').split(/\s+/).filter(t => t.length > 2);
 }
 
-function extractColumnsPerTable(matches) {
-  const map = new Map();
-  for (const m of matches) {
-    const cols = new Set();
-    for (const line of m.ddl.split('\n')) {
-      const hit = line.match(/^\s+-\s+(\S+)\s+\(/);
-      if (hit) cols.add(hit[1]);
-    }
-    map.set(m.id, cols);
+function expandQueryTokens(tokens) {
+  const expanded = new Set(tokens);
+  for (const token of tokens) {
+    const synonyms = METRIC_SYNONYMS[token];
+    if (synonyms) synonyms.forEach(s => expanded.add(s));
   }
-  return map;
+  return expanded;
+}
+
+function scoreColumn(colName, queryTokens) {
+  const colTokens = tokenize(colName);
+  let score = 0;
+  for (const ct of colTokens) {
+    if (queryTokens.has(ct)) score++;
+  }
+  return score;
+}
+
+function isStructuralColumn(colName, colType) {
+  const upper = colType.toUpperCase();
+  if (['DATE', 'TIMESTAMP', 'DATETIME', 'TIMESTAMP_NTZ', 'TIMESTAMP_LTZ', 'TIMESTAMP_TZ'].includes(upper)) return true;
+  const lc = colName.toLowerCase();
+  if (lc.endsWith('_id') || lc === 'id' || lc.endsWith('_name') || lc === 'name') return true;
+  if (lc === 'status' || lc === 'type' || lc === 'channel' || lc === 'source' || lc === 'currency') return true;
+  return false;
+}
+
+function filterColumns(ddl, queryTokens) {
+  const lines = ddl.split('\n');
+  const header = lines.filter(l => !l.match(/^\s+-\s/));
+  const colLines = lines.filter(l => l.match(/^\s+-\s/));
+
+  if (colLines.length <= MAX_COLUMNS_PER_TABLE) return ddl;
+
+  const scored = colLines.map(line => {
+    const nameMatch = line.match(/^\s+-\s+(\S+)\s+\(([^)]+)\)/);
+    const name = nameMatch?.[1] || '';
+    const type = nameMatch?.[2]?.split(',')[0]?.trim() || '';
+    const structural = isStructuralColumn(name, type);
+    const hasSamples = line.includes(' e.g. ');
+    const relevance = scoreColumn(name, queryTokens) + (hasSamples ? 10 : 0);
+    return { line, name, structural, relevance };
+  });
+
+  const structural = scored.filter(s => s.structural);
+  const rest = scored.filter(s => !s.structural).sort((a, b) => b.relevance - a.relevance);
+
+  const budget = MAX_COLUMNS_PER_TABLE - structural.length;
+  const selected = [...structural, ...rest.slice(0, Math.max(budget, 0))];
+  const omitted = colLines.length - selected.length;
+
+  const filteredDDL = [...header, ...selected.map(s => s.line)].join('\n');
+  const note = omitted > 0 ? `\n  (${omitted} less-relevant columns omitted)` : '';
+  return filteredDDL + note;
+}
+
+function buildTableContext(match, queryTokens) {
+  const filteredDDL = filterColumns(match.ddl, queryTokens);
+  const cols = filteredDDL.split('\n').filter(l => l.match(/^\s+-\s/));
+  const note = filteredDDL.includes('omitted') ? filteredDDL.split('\n').pop() : '';
+  const header = `TABLE: ${match.id} [${match.kind}] — ${cols.length} columns available`;
+  return `${header}\nVALID COLUMNS (ONLY these exist in this table):\n${cols.join('\n')}${note ? '\n' + note : ''}`;
+}
+
+export function buildCompilerContext(question, ontologyMatches) {
+  const queryTokens = expandQueryTokens(tokenize(question));
+  return ontologyMatches.map(m => buildTableContext(m, queryTokens)).join('\n\n');
 }
 
 export async function compileSQL(question, ontologyMatches) {
   const cfg    = getConfig();
   const openai = new OpenAI({ apiKey: cfg.openai.apiKey });
 
-  const context = ontologyMatches.map(buildTableContext).join('\n\n');
+  const context = buildCompilerContext(question, ontologyMatches);
   const userMessage = `ONTOLOGY CONTEXT:\n\n${context}\n\nQUESTION:\n${question}`;
 
   const resp = await openai.chat.completions.create({
@@ -74,10 +146,51 @@ export async function compileSQL(question, ontologyMatches) {
       { role: 'user',   content: userMessage },
     ],
     temperature: 0,
-    max_completion_tokens: 2048,
+    max_completion_tokens: 8192,
   });
 
-  let sql = resp.choices[0].message.content.trim();
+  const choice = resp.choices[0];
+  if (choice.finish_reason === 'length') {
+    throw new Error('Compiler output truncated — query too complex for token budget.');
+  }
+
+  let sql = (choice.message.content || '').trim();
+  sql = sql.replace(/^```(?:sql)?\s*\n?/i, '').replace(/\n?```\s*$/, '');
+
+  if (sql.startsWith('ERROR:')) {
+    throw new Error(sql);
+  }
+
+  return sql;
+}
+
+export async function recompileSQL(question, ontologyMatches, failedSQL, errorMessage) {
+  const cfg    = getConfig();
+  const openai = new OpenAI({ apiKey: cfg.openai.apiKey });
+
+  const context = buildCompilerContext(question, ontologyMatches);
+  const userMessage = `ONTOLOGY CONTEXT:\n\n${context}\n\nQUESTION:\n${question}`;
+
+  const errorFeedback = `The previous SQL failed with this error:\n\nSQL:\n${failedSQL}\n\nERROR:\n${errorMessage}\n\nFix the SQL. Remember: each column ONLY exists in the table it is listed under. Do not use a column from one table in a SELECT from a different table. Return ONLY the corrected SQL.`;
+
+  const resp = await openai.chat.completions.create({
+    model:    cfg.openai.chatModel,
+    messages: [
+      { role: 'system',    content: SYSTEM_PROMPT(cfg.warehouseType) },
+      { role: 'user',      content: userMessage },
+      { role: 'assistant', content: failedSQL },
+      { role: 'user',      content: errorFeedback },
+    ],
+    temperature: 0,
+    max_completion_tokens: 8192,
+  });
+
+  const choice = resp.choices[0];
+  if (choice.finish_reason === 'length') {
+    throw new Error('Compiler output truncated on retry.');
+  }
+
+  let sql = (choice.message.content || '').trim();
   sql = sql.replace(/^```(?:sql)?\s*\n?/i, '').replace(/\n?```\s*$/, '');
 
   if (sql.startsWith('ERROR:')) {

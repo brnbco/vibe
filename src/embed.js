@@ -5,13 +5,42 @@ import { getConfig } from './config.js';
 
 const BATCH_SIZE = 50;
 const EMBED_DIM  = 1536;
+const MAX_EMBED_COLS = 50;
+const MAX_EMBED_CHARS = 16000;
 
 function tableToText(db, schema, table) {
+  const fqn = `${db}.${schema}.${table.name}`;
+  const allCols = table.columns.map(c => {
+    const nullable = c.nullable ? '' : ', NOT NULL';
+    const comment  = c.comment ? ` — ${c.comment}` : '';
+    const samp = c.samples?.length ? ` e.g. ${c.samples.join(', ')}` : '';
+    return `  - ${c.name} (${c.type}${nullable})${comment}${samp}`;
+  });
+
+  const hasSamples = (line) => line.includes(' e.g. ');
+  const withData = allCols.filter(hasSamples);
+  const withoutData = allCols.filter(l => !hasSamples(l));
+  const prioritized = [...withData, ...withoutData].slice(0, MAX_EMBED_COLS);
+
+  const omitted = allCols.length - prioritized.length;
+  const cols = prioritized.join('\n') + (omitted > 0 ? `\n  (${omitted} more columns)` : '');
+
+  return [
+    `Table: ${fqn}`,
+    `Type: ${table.kind}`,
+    table.rows ? `Approximate Rows: ${table.rows}` : null,
+    `Columns:`,
+    cols,
+  ].filter(Boolean).join('\n');
+}
+
+function tableToFullDDL(db, schema, table) {
   const fqn = `${db}.${schema}.${table.name}`;
   const cols = table.columns.map(c => {
     const nullable = c.nullable ? '' : ', NOT NULL';
     const comment  = c.comment ? ` — ${c.comment}` : '';
-    return `  - ${c.name} (${c.type}${nullable})${comment}`;
+    const samp = c.samples?.length ? ` e.g. ${c.samples.join(', ')}` : '';
+    return `  - ${c.name} (${c.type}${nullable})${comment}${samp}`;
   }).join('\n');
 
   return [
@@ -51,7 +80,7 @@ export async function indexTopology(topology) {
     topology = JSON.parse(raw);
   }
 
-  const namespace = topology.warehouseType || cfg.warehouseType;
+  const namespace = cfg.pinecone.namespace || topology.warehouseType || cfg.warehouseType;
   const openai = new OpenAI({ apiKey: cfg.openai.apiKey });
   const pc     = new Pinecone({ apiKey: cfg.pinecone.apiKey });
   await ensureIndex(pc, cfg);
@@ -62,16 +91,22 @@ export async function indexTopology(topology) {
   for (const db of topology.databases) {
     for (const schema of db.schemas) {
       for (const table of schema.tables) {
-        const ddl = tableToText(db.name, schema.name, table);
+        const embedText = tableToText(db.name, schema.name, table);
+        const fullDDL   = tableToFullDDL(db.name, schema.name, table);
+
+        const cappedEmbed = embedText.length > MAX_EMBED_CHARS
+          ? embedText.slice(0, MAX_EMBED_CHARS) + '\n  (truncated for embedding)'
+          : embedText;
+
         records.push({
-          id:       tableToId(db.name, schema.name, table.name),
-          ddl,
+          id:        tableToId(db.name, schema.name, table.name),
+          embedText: cappedEmbed,
           metadata: {
             database: db.name,
             schema:   schema.name,
             table:    table.name,
             kind:     table.kind,
-            ddl,
+            ddl:      fullDDL.slice(0, 39000),
           },
         });
       }
@@ -82,7 +117,7 @@ export async function indexTopology(topology) {
 
   for (let i = 0; i < records.length; i += BATCH_SIZE) {
     const batch = records.slice(i, i + BATCH_SIZE);
-    const texts = batch.map(r => r.ddl);
+    const texts = batch.map(r => r.embedText);
 
     const resp = await openai.embeddings.create({
       model: cfg.openai.embedModel,

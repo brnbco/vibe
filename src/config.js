@@ -47,6 +47,7 @@ export function getConfig() {
     pinecone: {
       apiKey:    required('PINECONE_API_KEY'),
       indexName: optional('PINECONE_INDEX', 'semantic-compiler'),
+      namespace: optional('PINECONE_NAMESPACE', null),
       cloud:     optional('PINECONE_CLOUD', 'aws'),
       region:    optional('PINECONE_REGION', 'us-east-1'),
     },

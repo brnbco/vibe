@@ -1,6 +1,8 @@
 import { getConfig } from './config.js';
 import { writeFileSync, mkdirSync } from 'fs';
 
+const PROFILE_BATCH = 50;
+
 // ── Snowflake ────────────────────────────────────────────────────
 
 const SF_SKIP_SCHEMAS = new Set(['INFORMATION_SCHEMA']);
@@ -34,6 +36,101 @@ async function sfCrawlColumns(conn, execute, db, schema, obj) {
     })(),
     comment: c['comment'] || null,
   }));
+}
+
+function findDateColumn(columns) {
+  return columns.find(c =>
+    /^(DATE|TIMESTAMP|DATETIME|TIMESTAMP_NTZ|TIMESTAMP_LTZ|TIMESTAMP_TZ)$/i.test(c.type)
+  );
+}
+
+function isNumeric(type) {
+  return /NUMBER|FLOAT|REAL|DECIMAL|INT|DOUBLE|NUMERIC|BIGNUMERIC|INTEGER/i.test(type);
+}
+
+function isStringLike(type) {
+  return /VARCHAR|TEXT|STRING/i.test(type);
+}
+
+async function sfProfileTable(conn, execute, fqn, columns) {
+  const dateCol = findDateColumn(columns);
+  const numCols = columns.filter(c => isNumeric(c.type)).slice(0, PROFILE_BATCH);
+
+  if (numCols.length === 0) return {};
+
+  const exprs = numCols.flatMap(c => [
+    `SUM("${c.name}") AS "${c.name}__sum"`,
+    `COUNT(CASE WHEN "${c.name}" != 0 AND "${c.name}" IS NOT NULL THEN 1 END) AS "${c.name}__nnz"`,
+    `MAX("${c.name}") AS "${c.name}__max"`,
+  ]).join(', ');
+
+  const dateFilter = dateCol
+    ? `WHERE "${dateCol.name}" >= DATEADD(day, -30, CURRENT_DATE())`
+    : '';
+
+  try {
+    const [row] = await execute(conn, `SELECT ${exprs} FROM ${fqn} ${dateFilter}`);
+    const profile = {};
+    for (const c of numCols) {
+      const sum = Number(row?.[`${c.name}__sum`]) || 0;
+      const nnz = Number(row?.[`${c.name}__nnz`]) || 0;
+      const max = Number(row?.[`${c.name}__max`]) || 0;
+      if (nnz > 0) profile[c.name] = { sum, nonZeroCount: nnz, max };
+    }
+    return profile;
+  } catch { return {}; }
+}
+
+async function sfProfileStrings(conn, execute, fqn, columns) {
+  const dateCol = findDateColumn(columns);
+  const strCols = columns.filter(c => isStringLike(c.type)).slice(0, 10);
+  if (strCols.length === 0) return {};
+
+  const exprs = strCols.map(c =>
+    `MAX("${c.name}") AS "${c.name}__sample"`
+  ).join(', ');
+
+  const dateFilter = dateCol
+    ? `WHERE "${dateCol.name}" >= DATEADD(day, -7, CURRENT_DATE())`
+    : '';
+
+  try {
+    const [row] = await execute(conn, `SELECT ${exprs} FROM ${fqn} ${dateFilter}`);
+    const profile = {};
+    for (const c of strCols) {
+      const v = row?.[`${c.name}__sample`];
+      if (v) profile[c.name] = [String(v)];
+    }
+    return profile;
+  } catch { return {}; }
+}
+
+async function sfGetDateRange(conn, execute, fqn, dateCol) {
+  if (!dateCol) return null;
+  try {
+    const [row] = await execute(conn,
+      `SELECT MIN("${dateCol.name}") AS mn, MAX("${dateCol.name}") AS mx FROM ${fqn}`
+    );
+    return { min: String(row.mn), max: String(row.mx) };
+  } catch { return null; }
+}
+
+function buildSamples(columns, numericProfile, stringProfile, dateRange, dateCol) {
+  const samples = {};
+  for (const c of columns) {
+    const np = numericProfile[c.name];
+    if (np) {
+      const avg = np.nonZeroCount > 0 ? (np.sum / np.nonZeroCount).toFixed(2) : null;
+      samples[c.name] = [`sum=${np.sum}`, `nonzero_rows=${np.nonZeroCount}`, `max=${np.max}`];
+      continue;
+    }
+    const sp = stringProfile[c.name];
+    if (sp) { samples[c.name] = sp; continue; }
+    if (dateCol && c.name === dateCol.name && dateRange) {
+      samples[c.name] = [`range: ${dateRange.min} to ${dateRange.max}`];
+    }
+  }
+  return samples;
 }
 
 async function crawlSnowflake(cfg) {
@@ -73,7 +170,19 @@ async function crawlSnowflake(cfg) {
         for (const t of tables) {
           console.log(`    ▸ ${t.name} (${t.rows ?? '?'} rows)`);
           const cols = await sfCrawlColumns(conn, execute, db, s.name, t.name);
-          schemaEntry.tables.push({ name: t.name, kind: 'TABLE', rows: Number(t.rows) || 0, columns: cols });
+          const fqn = `"${db}"."${s.name}"."${t.name}"`;
+          const dateCol = findDateColumn(cols);
+          console.log(`      profiling…`);
+          const [numP, strP, dr] = await Promise.all([
+            sfProfileTable(conn, execute, fqn, cols),
+            sfProfileStrings(conn, execute, fqn, cols),
+            sfGetDateRange(conn, execute, fqn, dateCol),
+          ]);
+          const samples = buildSamples(cols, numP, strP, dr, dateCol);
+          schemaEntry.tables.push({
+            name: t.name, kind: 'TABLE', rows: Number(t.rows) || 0,
+            columns: cols.map(c => ({ ...c, samples: samples[c.name] || [] })),
+          });
         }
 
         try {
@@ -81,7 +190,19 @@ async function crawlSnowflake(cfg) {
           for (const v of views) {
             console.log(`    ▸ ${v.name} (view)`);
             const cols = await sfCrawlColumns(conn, execute, db, s.name, v.name);
-            schemaEntry.tables.push({ name: v.name, kind: 'VIEW', rows: 0, columns: cols });
+            const fqn = `"${db}"."${s.name}"."${v.name}"`;
+            const dateCol = findDateColumn(cols);
+            console.log(`      profiling…`);
+            const [numP, strP, dr] = await Promise.all([
+              sfProfileTable(conn, execute, fqn, cols),
+              sfProfileStrings(conn, execute, fqn, cols),
+              sfGetDateRange(conn, execute, fqn, dateCol),
+            ]);
+            const samples = buildSamples(cols, numP, strP, dr, dateCol);
+            schemaEntry.tables.push({
+              name: v.name, kind: 'VIEW', rows: 0,
+              columns: cols.map(c => ({ ...c, samples: samples[c.name] || [] })),
+            });
           }
         } catch { /* views may not be accessible */ }
 
@@ -96,6 +217,82 @@ async function crawlSnowflake(cfg) {
 }
 
 // ── BigQuery ─────────────────────────────────────────────────────
+
+async function bqProfileTable(bq, fqn, columns) {
+  const dateCol = findDateColumn(columns);
+  const numCols = columns.filter(c => isNumeric(c.type)).slice(0, PROFILE_BATCH);
+
+  if (numCols.length === 0) return {};
+
+  const exprs = numCols.flatMap(c => [
+    `SUM(\`${c.name}\`) AS \`${c.name}__sum\``,
+    `COUNTIF(\`${c.name}\` IS NOT NULL AND \`${c.name}\` != 0) AS \`${c.name}__nnz\``,
+    `MAX(\`${c.name}\`) AS \`${c.name}__max\``,
+  ]).join(', ');
+
+  const dateFilter = dateCol
+    ? `WHERE \`${dateCol.name}\` >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY)`
+    : '';
+
+  try {
+    const [rows] = await bq.query({
+      query: `SELECT ${exprs} FROM \`${fqn}\` ${dateFilter}`,
+      useLegacySql: false,
+    });
+    const row = rows[0];
+    const profile = {};
+    for (const c of numCols) {
+      const sum = Number(row?.[`${c.name}__sum`]) || 0;
+      const nnz = Number(row?.[`${c.name}__nnz`]) || 0;
+      const max = Number(row?.[`${c.name}__max`]) || 0;
+      if (nnz > 0) profile[c.name] = { sum, nonZeroCount: nnz, max };
+    }
+    return profile;
+  } catch { return {}; }
+}
+
+async function bqProfileStrings(bq, fqn, columns) {
+  const dateCol = findDateColumn(columns);
+  const strCols = columns.filter(c => isStringLike(c.type)).slice(0, 10);
+  if (strCols.length === 0) return {};
+
+  const exprs = strCols.map(c =>
+    `MAX(\`${c.name}\`) AS \`${c.name}__sample\``
+  ).join(', ');
+
+  const dateFilter = dateCol
+    ? `WHERE \`${dateCol.name}\` >= DATE_SUB(CURRENT_DATE(), INTERVAL 7 DAY)`
+    : '';
+
+  try {
+    const [rows] = await bq.query({
+      query: `SELECT ${exprs} FROM \`${fqn}\` ${dateFilter}`,
+      useLegacySql: false,
+    });
+    const row = rows[0];
+    const profile = {};
+    for (const c of strCols) {
+      let v = row?.[`${c.name}__sample`];
+      if (v && typeof v === 'object' && v.value !== undefined) v = String(v.value);
+      if (v) profile[c.name] = [String(v)];
+    }
+    return profile;
+  } catch { return {}; }
+}
+
+async function bqGetDateRange(bq, fqn, dateCol) {
+  if (!dateCol) return null;
+  try {
+    const [rows] = await bq.query({
+      query: `SELECT MIN(\`${dateCol.name}\`) AS mn, MAX(\`${dateCol.name}\`) AS mx FROM \`${fqn}\``,
+      useLegacySql: false,
+    });
+    const row = rows[0];
+    const mn = row?.mn?.value ? String(row.mn.value) : String(row?.mn);
+    const mx = row?.mx?.value ? String(row.mx.value) : String(row?.mx);
+    return { min: mn, max: mx };
+  } catch { return null; }
+}
 
 async function crawlBigQuery(cfg) {
   const { getClient } = await import('./bigquery.js');
@@ -134,7 +331,54 @@ async function crawlBigQuery(cfg) {
         comment:  f.description || null,
       }));
 
-      schemaEntry.tables.push({ name: tbl.id, kind, rows: rowCount, columns });
+      const fqn = `${cfg.projectId}.${ds.id}.${tbl.id}`;
+      const dateCol = findDateColumn(columns);
+      console.log(`    profiling…`);
+
+      const numBatches = [];
+      const numCols = columns.filter(c => isNumeric(c.type));
+      for (let i = 0; i < numCols.length; i += PROFILE_BATCH) {
+        numBatches.push(numCols.slice(i, i + PROFILE_BATCH));
+      }
+
+      let numericProfile = {};
+      for (const batch of numBatches) {
+        const exprs = batch.flatMap(c => [
+          `SUM(\`${c.name}\`) AS \`${c.name}__sum\``,
+          `COUNTIF(\`${c.name}\` IS NOT NULL AND \`${c.name}\` != 0) AS \`${c.name}__nnz\``,
+          `MAX(\`${c.name}\`) AS \`${c.name}__max\``,
+        ]).join(', ');
+
+        const dateFilter = dateCol
+          ? `WHERE \`${dateCol.name}\` >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY)`
+          : '';
+
+        try {
+          const [rows] = await bq.query({
+            query: `SELECT ${exprs} FROM \`${fqn}\` ${dateFilter}`,
+            useLegacySql: false,
+          });
+          const row = rows[0];
+          for (const c of batch) {
+            const sum = Number(row?.[`${c.name}__sum`]) || 0;
+            const nnz = Number(row?.[`${c.name}__nnz`]) || 0;
+            const max = Number(row?.[`${c.name}__max`]) || 0;
+            if (nnz > 0) numericProfile[c.name] = { sum, nonZeroCount: nnz, max };
+          }
+        } catch { /* skip batch */ }
+      }
+
+      const [strP, dr] = await Promise.all([
+        bqProfileStrings(bq, fqn, columns),
+        bqGetDateRange(bq, fqn, dateCol),
+      ]);
+
+      const samples = buildSamples(columns, numericProfile, strP, dr, dateCol);
+
+      schemaEntry.tables.push({
+        name: tbl.id, kind, rows: rowCount,
+        columns: columns.map(c => ({ ...c, samples: samples[c.name] || [] })),
+      });
     }
     project.schemas.push(schemaEntry);
   }
