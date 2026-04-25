@@ -33,8 +33,17 @@ export function formatResults({ columns, rows, rowCount }) {
 
   const scalar = (v) => {
     if (v == null) return '';
+    if (Array.isArray(v)) return v.map(item => {
+      if (typeof item === 'object' && item !== null) {
+        return Object.entries(item).map(([k, val]) => `${k}=${val}`).join(', ');
+      }
+      return String(item);
+    }).join(' | ');
     if (typeof v === 'object' && v.value !== undefined) return String(v.value);
     if (v instanceof Date) return v.toISOString();
+    if (typeof v === 'object' && v !== null) {
+      return Object.entries(v).map(([k, val]) => `${k}=${val}`).join(', ');
+    }
     return String(v);
   };
 
@@ -45,12 +54,7 @@ export function formatResults({ columns, rows, rowCount }) {
   const cap = 40;
   const capped = widths.map(w => Math.min(w, cap));
 
-  const fmt = (val) => {
-    if (val == null) return '';
-    if (typeof val === 'object' && val.value !== undefined) return String(val.value);
-    if (val instanceof Date) return val.toISOString();
-    return String(val);
-  };
+  const fmt = (val) => scalar(val);
 
   const pad = (val, i) => {
     const s = fmt(val);
