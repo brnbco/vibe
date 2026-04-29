@@ -219,8 +219,8 @@ function pineconeMatchToResult(m) {
     database: m.metadata?.database ?? m.database,
     schema: m.metadata?.schema ?? m.schema,
     table: m.metadata?.table ?? m.table,
-    kind: m.metadata?.kind ?? m.kind,
-    ddl: m.metadata?.ddl ?? m.ddl,
+    kind: m.metadata?.kind ?? m.kind ?? "",
+    ddl: m.metadata?.ddl ?? m.ddl ?? "",
     metadata: m.metadata ?? {},
   };
 }
