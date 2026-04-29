@@ -3,7 +3,7 @@ import { getConfig } from './config.js';
 
 const MAX_COLUMNS_PER_TABLE = 30;
 
-const DIALECT_HINTS = {
+export const DIALECT_HINTS = {
   snowflake: `TARGET DIALECT: Snowflake SQL
 - Use fully qualified names: DATABASE.SCHEMA.TABLE_NAME
 - Use DATEADD, DATEDIFF, CURRENT_DATE(), CURRENT_TIMESTAMP()
@@ -18,7 +18,7 @@ const DIALECT_HINTS = {
 - Use EXCEPT/REPLACE in SELECT * expressions where useful`,
 };
 
-const SYSTEM_PROMPT = (dialect) => `You are a SQL expert and semantic compiler. You translate natural language questions into precise, executable SQL queries.
+export const SYSTEM_PROMPT = (dialect) => `You are a SQL expert and semantic compiler. You translate natural language questions into precise, executable SQL queries.
 
 You receive an ONTOLOGY CONTEXT — table definitions from a data warehouse. Each table has a STRICT column list. You may ONLY use columns listed under that specific table.
 
@@ -49,18 +49,18 @@ OUTPUT:
 Return ONLY the raw SQL query — no markdown fences, no explanation.
 If the question cannot be answered with the provided tables, start your response with "ERROR:" and explain what is missing.`;
 
-function tokenize(text) {
+export function tokenize(text) {
   return text.toLowerCase().replace(/[^a-z0-9]+/g, ' ').split(/\s+/).filter(t => t.length > 2);
 }
 
-function stem(token) {
+export function stem(token) {
   if (token.length > 4 && token.endsWith('s')) return token.slice(0, -1);
   if (token.length > 5 && token.endsWith('ing')) return token.slice(0, -3);
   if (token.length > 4 && token.endsWith('ed')) return token.slice(0, -2);
   return token;
 }
 
-function expandQueryTokens(tokens) {
+export function expandQueryTokens(tokens) {
   const expanded = new Set();
   for (const t of tokens) {
     expanded.add(t);
@@ -69,7 +69,7 @@ function expandQueryTokens(tokens) {
   return expanded;
 }
 
-function scoreColumn(colName, queryTokens) {
+export function scoreColumn(colName, queryTokens) {
   const colTokens = tokenize(colName);
   let score = 0;
   for (const ct of colTokens) {
@@ -78,7 +78,7 @@ function scoreColumn(colName, queryTokens) {
   return score;
 }
 
-function isStructuralColumn(colName, colType) {
+export function isStructuralColumn(colName, colType) {
   const upper = colType.toUpperCase();
   if (['DATE', 'TIMESTAMP', 'DATETIME', 'TIMESTAMP_NTZ', 'TIMESTAMP_LTZ', 'TIMESTAMP_TZ'].includes(upper)) return true;
   const lc = colName.toLowerCase();
@@ -87,7 +87,7 @@ function isStructuralColumn(colName, colType) {
   return false;
 }
 
-function parseDataVolume(line) {
+export function parseDataVolume(line) {
   const nzr = line.match(/nonzero_rows=(\d+)/);
   if (nzr) return Number(nzr[1]);
   const nnr = line.match(/nonnull_rows=(\d+)/);
@@ -95,7 +95,7 @@ function parseDataVolume(line) {
   return 0;
 }
 
-function filterColumns(ddl, queryTokens) {
+export function filterColumns(ddl, queryTokens) {
   const lines = ddl.split('\n');
   const header = lines.filter(l => !l.match(/^\s+-\s/));
   const colLines = lines.filter(l => l.match(/^\s+-\s/));
@@ -143,7 +143,7 @@ function filterColumns(ddl, queryTokens) {
   return filteredDDL + note;
 }
 
-function buildTableContext(match, queryTokens) {
+export function buildTableContext(match, queryTokens) {
   const filteredDDL = filterColumns(match.ddl, queryTokens);
   const cols = filteredDDL.split('\n').filter(l => l.match(/^\s+-\s/));
   const note = filteredDDL.includes('omitted') ? filteredDDL.split('\n').pop() : '';

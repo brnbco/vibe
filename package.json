@@ -1,30 +1,54 @@
 {
   "name": "@brnbco/semantic-compiler",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
-  "main": "src/index.js",
+  "main": "src/lib.js",
+  "exports": {
+    ".": "./src/lib.js",
+    "./cli": "./src/index.js",
+    "./crawl": "./src/crawl.js",
+    "./embed": "./src/embed.js",
+    "./search": "./src/search.js",
+    "./compile": "./src/compile.js",
+    "./execute": "./src/execute.js"
+  },
   "scripts": {
     "init:env": "cp env.sample .env",
     "crawl": "node src/index.js crawl",
     "index": "node src/index.js index",
     "query": "node src/index.js query",
     "pipeline": "node src/index.js pipeline",
-    "test": "node tests/runner.js",
-    "test:watch": "node tests/runner.js --watch"
+    "test": "npm run test:unit",
+    "test:unit": "node --test tests/lib.test.js",
+    "test:e2e": "node tests/runner.js",
+    "test:e2e:watch": "node tests/runner.js --watch"
   },
   "keywords": [
     "semantic-compiler",
     "snowflake",
+    "bigquery",
     "pinecone",
     "openai"
   ],
   "author": "",
   "license": "ISC",
-  "description": "Semantic compiler: crawl warehouse topology, vectorize, query with natural language, generate + execute SQL.",
+  "description": "Semantic compiler: crawl warehouse topology, vectorize, query with natural language, generate + execute SQL. Library + CLI.",
+  "peerDependencies": {
+    "@google-cloud/bigquery": "^8",
+    "@pinecone-database/pinecone": "^4 || ^7",
+    "openai": "^4 || ^5 || ^6",
+    "snowflake-sdk": "^2"
+  },
+  "peerDependenciesMeta": {
+    "@google-cloud/bigquery": { "optional": true },
+    "snowflake-sdk": { "optional": true }
+  },
   "dependencies": {
+    "dotenv": "^16"
+  },
+  "devDependencies": {
     "@google-cloud/bigquery": "^8.1.1",
     "@pinecone-database/pinecone": "^4",
-    "dotenv": "^16",
     "openai": "^4",
     "snowflake-sdk": "^2"
   }

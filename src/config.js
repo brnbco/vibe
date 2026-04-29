@@ -54,7 +54,7 @@ export function getConfig() {
     openai: {
       apiKey:     required('OPENAI_API_KEY'),
       embedModel: optional('OPENAI_EMBED_MODEL', 'text-embedding-3-small'),
-      chatModel:  optional('OPENAI_CHAT_MODEL', 'gpt-4o'),
+      chatModel:  optional('OPENAI_CHAT_MODEL', 'gpt-5.4'),
     },
   };
   return _config;

@@ -8,7 +8,7 @@ const EMBED_DIM  = 1536;
 const MAX_EMBED_COLS = 50;
 const MAX_EMBED_CHARS = 16000;
 
-function tableToText(db, schema, table) {
+export function tableToText(db, schema, table) {
   const fqn = `${db}.${schema}.${table.name}`;
   const allCols = table.columns.map(c => {
     const nullable = c.nullable ? '' : ', NOT NULL';
@@ -34,7 +34,7 @@ function tableToText(db, schema, table) {
   ].filter(Boolean).join('\n');
 }
 
-function tableToFullDDL(db, schema, table) {
+export function tableToFullDDL(db, schema, table) {
   const fqn = `${db}.${schema}.${table.name}`;
   const cols = table.columns.map(c => {
     const nullable = c.nullable ? '' : ', NOT NULL';
