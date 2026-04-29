@@ -13,6 +13,7 @@ import {
   searchOntologyWithClients,
   buildProfileSqlForBigQuery,
   buildProfileSqlForSnowflake,
+  buildDateWindowWhere,
   tableToEmbedText,
   tableToFullDDL,
   SUPPORTED_DIALECTS,
@@ -150,6 +151,39 @@ test('buildProfileSqlForBigQuery emits SAFE-aggregated SUM/COUNT/MAX with date w
   assert.match(sql, /FROM `p\.d\.t`/);
 });
 
+test('buildProfileSqlForBigQuery uses TIMESTAMP_SUB for TIMESTAMP date columns', () => {
+  // Bug from 2026-04-29 user test: BigQuery rejects DATE >= TIMESTAMP
+  // comparison with "No matching signature for operator >=". Builder must
+  // dispatch on date-column type so the WHERE expression matches.
+  const sql = buildProfileSqlForBigQuery({
+    fqn: '`p.d.t`',
+    numericColumns: [{ name: 'amount' }],
+    dateColumn: { name: 'monitoring_timestamp', type: 'TIMESTAMP' },
+    dayWindow: 30,
+  });
+  assert.match(sql, /WHERE `monitoring_timestamp` >= TIMESTAMP_SUB\(CURRENT_TIMESTAMP\(\), INTERVAL 30 DAY\)/);
+});
+
+test('buildProfileSqlForBigQuery uses DATETIME_SUB for DATETIME date columns', () => {
+  const sql = buildProfileSqlForBigQuery({
+    fqn: '`p.d.t`',
+    numericColumns: [{ name: 'amount' }],
+    dateColumn: { name: 'event_dt', type: 'DATETIME' },
+    dayWindow: 14,
+  });
+  assert.match(sql, /WHERE `event_dt` >= DATETIME_SUB\(CURRENT_DATETIME\(\), INTERVAL 14 DAY\)/);
+});
+
+test('buildProfileSqlForBigQuery defaults to DATE_SUB when type is missing (back-compat)', () => {
+  const sql = buildProfileSqlForBigQuery({
+    fqn: '`p.d.t`',
+    numericColumns: [{ name: 'amount' }],
+    dateColumn: { name: 'order_date' },
+    dayWindow: 30,
+  });
+  assert.match(sql, /DATE_SUB\(CURRENT_DATE\(\), INTERVAL 30 DAY\)/);
+});
+
 test('buildProfileSqlForBigQuery omits WHERE when dateColumn missing', () => {
   const sql = buildProfileSqlForBigQuery({
     fqn: '`p.d.t`',
@@ -159,15 +193,25 @@ test('buildProfileSqlForBigQuery omits WHERE when dateColumn missing', () => {
   assert.equal(sql.includes('WHERE'), false);
 });
 
-test('buildProfileSqlForSnowflake emits Snowflake DATEADD WHERE clause', () => {
+test('buildProfileSqlForSnowflake emits Snowflake DATEADD WHERE clause for DATE', () => {
   const sql = buildProfileSqlForSnowflake({
     fqn: '"DB"."S"."T"',
     numericColumns: [{ name: 'AMOUNT' }],
-    dateColumn: { name: 'ORDER_DATE' },
+    dateColumn: { name: 'ORDER_DATE', type: 'DATE' },
     dayWindow: 30,
   });
   assert.match(sql, /SUM\("AMOUNT"\)/);
   assert.match(sql, /WHERE "ORDER_DATE" >= DATEADD\(day, -30, CURRENT_DATE\(\)\)/);
+});
+
+test('buildProfileSqlForSnowflake uses CURRENT_TIMESTAMP for TIMESTAMP_NTZ date columns', () => {
+  const sql = buildProfileSqlForSnowflake({
+    fqn: '"DB"."S"."T"',
+    numericColumns: [{ name: 'AMOUNT' }],
+    dateColumn: { name: 'EVENT_TS', type: 'TIMESTAMP_NTZ' },
+    dayWindow: 30,
+  });
+  assert.match(sql, /WHERE "EVENT_TS" >= DATEADD\(day, -30, CURRENT_TIMESTAMP\(\)\)/);
 });
 
 test('buildProfileSqlForBigQuery returns null when no numeric columns', () => {
@@ -177,6 +221,39 @@ test('buildProfileSqlForBigQuery returns null when no numeric columns', () => {
     dateColumn: { name: 'order_date' },
   });
   assert.equal(sql, null);
+});
+
+test('buildDateWindowWhere — bigquery DATE/TIMESTAMP/DATETIME dispatch', () => {
+  assert.equal(
+    buildDateWindowWhere({ dialect: 'bigquery', columnName: 'd', columnType: 'DATE', dayWindow: 30 }),
+    '`d` >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY)',
+  );
+  assert.equal(
+    buildDateWindowWhere({ dialect: 'bigquery', columnName: 'ts', columnType: 'TIMESTAMP', dayWindow: 30 }),
+    '`ts` >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 DAY)',
+  );
+  assert.equal(
+    buildDateWindowWhere({ dialect: 'bigquery', columnName: 'dt', columnType: 'DATETIME', dayWindow: 30 }),
+    '`dt` >= DATETIME_SUB(CURRENT_DATETIME(), INTERVAL 30 DAY)',
+  );
+});
+
+test('buildDateWindowWhere — snowflake DATE/TIMESTAMP_NTZ dispatch', () => {
+  assert.equal(
+    buildDateWindowWhere({ dialect: 'snowflake', columnName: 'D', columnType: 'DATE', dayWindow: 30 }),
+    '"D" >= DATEADD(day, -30, CURRENT_DATE())',
+  );
+  assert.equal(
+    buildDateWindowWhere({ dialect: 'snowflake', columnName: 'TS', columnType: 'TIMESTAMP_NTZ', dayWindow: 30 }),
+    '"TS" >= DATEADD(day, -30, CURRENT_TIMESTAMP())',
+  );
+});
+
+test('buildDateWindowWhere — defaults to date-typed clause when type missing', () => {
+  assert.equal(
+    buildDateWindowWhere({ dialect: 'bigquery', columnName: 'd', dayWindow: 30 }),
+    '`d` >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY)',
+  );
 });
 
 // =======================================================================

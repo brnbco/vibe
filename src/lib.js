@@ -323,6 +323,34 @@ export async function searchOntologyWithClients({
 // numeric columns to profile.
 
 /**
+ * Build a dialect-aware "<col> >= <now> - <dayWindow> days" WHERE expression.
+ *
+ * BigQuery doesn't auto-coerce DATE and TIMESTAMP, so the clause must use
+ * the matching `*_SUB(CURRENT_*())` pair for the column's type. Snowflake
+ * is more permissive but using the matching `CURRENT_TIMESTAMP()` for
+ * TIMESTAMP-family columns avoids implicit casts.
+ *
+ * Returns the bare expression (no leading 'WHERE'). Caller composes.
+ */
+export function buildDateWindowWhere({ dialect, columnName, columnType, dayWindow = 30 }) {
+  const isTimestamp = !!columnType && /^(TIMESTAMP|TIMESTAMP_NTZ|TIMESTAMP_LTZ|TIMESTAMP_TZ)$/i.test(columnType);
+  const isDatetime = !!columnType && /^DATETIME$/i.test(columnType);
+
+  if (dialect === 'bigquery') {
+    const quoted = `\`${columnName}\``;
+    if (isTimestamp) return `${quoted} >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL ${dayWindow} DAY)`;
+    if (isDatetime) return `${quoted} >= DATETIME_SUB(CURRENT_DATETIME(), INTERVAL ${dayWindow} DAY)`;
+    // DATE (or unspecified type — back-compat with original behaviour)
+    return `${quoted} >= DATE_SUB(CURRENT_DATE(), INTERVAL ${dayWindow} DAY)`;
+  }
+
+  // snowflake
+  const quoted = `"${columnName}"`;
+  const nowFn = (isTimestamp || isDatetime) ? 'CURRENT_TIMESTAMP()' : 'CURRENT_DATE()';
+  return `${quoted} >= DATEADD(day, -${dayWindow}, ${nowFn})`;
+}
+
+/**
  * Build the BigQuery profiling SQL: SUM / COUNT(!= 0) / MAX per column,
  * scoped to the last `dayWindow` days when a date column is present.
  */
@@ -336,7 +364,7 @@ export function buildProfileSqlForBigQuery({ fqn, numericColumns, dateColumn, da
   ]).join(', ');
 
   const where = dateColumn
-    ? ` WHERE \`${dateColumn.name}\` >= DATE_SUB(CURRENT_DATE(), INTERVAL ${dayWindow} DAY)`
+    ? ` WHERE ${buildDateWindowWhere({ dialect: 'bigquery', columnName: dateColumn.name, columnType: dateColumn.type, dayWindow })}`
     : '';
 
   return `SELECT ${exprs} FROM ${fqn}${where}`;
@@ -356,7 +384,7 @@ export function buildProfileSqlForSnowflake({ fqn, numericColumns, dateColumn, d
   ]).join(', ');
 
   const where = dateColumn
-    ? ` WHERE "${dateColumn.name}" >= DATEADD(day, -${dayWindow}, CURRENT_DATE())`
+    ? ` WHERE ${buildDateWindowWhere({ dialect: 'snowflake', columnName: dateColumn.name, columnType: dateColumn.type, dayWindow })}`
     : '';
 
   return `SELECT ${exprs} FROM ${fqn}${where}`;
