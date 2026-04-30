@@ -407,3 +407,35 @@ export function findDateColumn(columns) {
     /^(DATE|TIMESTAMP|DATETIME|TIMESTAMP_NTZ|TIMESTAMP_LTZ|TIMESTAMP_TZ)$/i.test(c.type)
   );
 }
+
+// =====================================================================
+// Column prioritization (for ingest-time DDL ordering)
+// =====================================================================
+//
+// Pinecone caps a single metadata string field at ~39 KB. Wide tables
+// (300+ cols) can overflow that even after the OG `tableToFullDDL` cap
+// kicks in, and naive truncation drops whatever happens to live in the
+// tail — possibly the columns the LLM compiler needs most.
+//
+// Sort columns at ingest time so the highest-signal ones come first:
+//
+//   1. structural (date / id / name / status / type / channel / source /
+//      currency) — these are filterColumns()'s "always include" set
+//   2. data-having (have profile samples — proxies for "actively used")
+//   3. everything else
+//
+// Within each group, original input order is preserved (stable sort).
+
+export function prioritizeColumnsForDdl(columns) {
+  const tagged = columns.map((c, originalIndex) => {
+    const structural = isStructuralColumn(c.name, c.type);
+    const hasSamples = !!(c.samples && c.samples.length > 0);
+    const tier = structural ? 0 : (hasSamples ? 1 : 2);
+    return { c, tier, originalIndex };
+  });
+  tagged.sort((a, b) => {
+    if (a.tier !== b.tier) return a.tier - b.tier;
+    return a.originalIndex - b.originalIndex;
+  });
+  return tagged.map((t) => t.c);
+}

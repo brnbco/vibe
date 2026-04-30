@@ -14,6 +14,7 @@ import {
   buildProfileSqlForBigQuery,
   buildProfileSqlForSnowflake,
   buildDateWindowWhere,
+  prioritizeColumnsForDdl,
   tableToEmbedText,
   tableToFullDDL,
   SUPPORTED_DIALECTS,
@@ -254,6 +255,72 @@ test('buildDateWindowWhere — defaults to date-typed clause when type missing',
     buildDateWindowWhere({ dialect: 'bigquery', columnName: 'd', dayWindow: 30 }),
     '`d` >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY)',
   );
+});
+
+// =====================================================================
+// prioritizeColumnsForDdl
+// =====================================================================
+
+test('prioritizeColumnsForDdl puts structural columns first', () => {
+  // Bug from 2026-04-30 user test: 300+ column tables overflow Pinecone's
+  // 39 KB per-string-field metadata budget at ingest time. The DDL gets
+  // truncated from the tail. If structural columns (date / id / name /
+  // status / type / channel / source / currency) happen to live in the
+  // tail, the compiler's filterColumns can't include them — they're gone.
+  //
+  // Pre-sort at ingest so structural cols always survive truncation.
+  const cols = [
+    { name: "amount_facebook_ads", type: "NUMBER", samples: ["sum=100"] },
+    { name: "user_id",             type: "STRING" },
+    { name: "spend_meta",          type: "NUMBER" },
+    { name: "order_date",          type: "DATE" },
+    { name: "channel",             type: "STRING" },
+  ];
+  const out = prioritizeColumnsForDdl(cols);
+  // date / id / channel are structural; should come first (in any order
+  // among structural; we don't lock the within-group ordering)
+  const structuralPositions = ["order_date", "user_id", "channel"].map(
+    (n) => out.findIndex((c) => c.name === n),
+  );
+  const nonStructuralPositions = ["amount_facebook_ads", "spend_meta"].map(
+    (n) => out.findIndex((c) => c.name === n),
+  );
+  for (const sp of structuralPositions) {
+    for (const nsp of nonStructuralPositions) {
+      assert.ok(sp < nsp, `structural col at ${sp} should precede non-structural at ${nsp}`);
+    }
+  }
+});
+
+test('prioritizeColumnsForDdl puts data-having (samples) before sample-less among non-structural', () => {
+  const cols = [
+    { name: "rare_unused_col",  type: "NUMBER" },
+    { name: "amount",           type: "NUMBER", samples: ["sum=100", "max=50"] },
+    { name: "another_unused",   type: "NUMBER" },
+    { name: "qty",              type: "NUMBER", samples: ["sum=10"] },
+  ];
+  const out = prioritizeColumnsForDdl(cols);
+  const amount = out.findIndex((c) => c.name === "amount");
+  const qty = out.findIndex((c) => c.name === "qty");
+  const unused1 = out.findIndex((c) => c.name === "rare_unused_col");
+  const unused2 = out.findIndex((c) => c.name === "another_unused");
+  assert.ok(amount < unused1 && amount < unused2);
+  assert.ok(qty < unused1 && qty < unused2);
+});
+
+test('prioritizeColumnsForDdl is stable within each priority group', () => {
+  // Same priority -> preserve original order (so deterministic output).
+  const cols = [
+    { name: "structural_a", type: "DATE" },
+    { name: "structural_b", type: "DATE" },
+    { name: "structural_c", type: "DATE" },
+  ];
+  const out = prioritizeColumnsForDdl(cols);
+  assert.deepEqual(out.map((c) => c.name), ["structural_a", "structural_b", "structural_c"]);
+});
+
+test('prioritizeColumnsForDdl returns empty array for empty input', () => {
+  assert.deepEqual(prioritizeColumnsForDdl([]), []);
 });
 
 // =======================================================================
