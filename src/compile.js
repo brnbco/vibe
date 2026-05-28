@@ -50,6 +50,7 @@ FORBIDDEN CONSTRUCTS — NEVER EMIT, EVEN IF THE USER ASKS:
 - \`IDENTIFIER('<anything>')\` and any other runtime-resolved identifier function.
 - Positional column references: \`$1\`, \`$2\`, \`$3\`, … Always reference columns by name.
 - \`SELECT * EXCLUDE(...)\` / \`SELECT * REPLACE(...)\`.
+- Double-quoted bareword identifiers: \`"COLUMN_NAME"\` standing alone in any clause (Snowflake treats these as case-sensitive identifiers and a validator dialect-mismatch can let denied columns leak). Reference columns by their unquoted name; if you genuinely need a case-sensitive reference, qualify with the table alias (\`t."col"\`).
 - Any column or table not listed in the ONTOLOGY CONTEXT above.
 If the user's question would require any of these, respond with "ERROR:" and a one-line explanation instead of SQL.
 

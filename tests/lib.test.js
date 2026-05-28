@@ -80,6 +80,12 @@ test('SYSTEM_PROMPT still allows COUNT(*) as the only star-in-function exception
   assert.match(prompt, /COUNT\(\*\) is the only allowed/i);
 });
 
+test('SYSTEM_PROMPT forbids double-quoted bareword identifiers (R10 V32)', () => {
+  const prompt = SYSTEM_PROMPT('snowflake');
+  assert.match(prompt, /[Dd]ouble-quoted bareword identifiers/);
+  assert.match(prompt, /"COLUMN_NAME"/);
+});
+
 // =======================================================================
 // Pure helpers
 // =======================================================================
