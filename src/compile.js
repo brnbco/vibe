@@ -45,6 +45,14 @@ RULES:
 6. When computing metrics (ROAS, CPA, CTR, totals, averages), ALWAYS use SUM/COUNT/AVG with GROUP BY — raw tables almost always have multiple rows per date/entity.
 7. Format the SQL cleanly.
 
+FORBIDDEN CONSTRUCTS — NEVER EMIT, EVEN IF THE USER ASKS:
+- \`*\` inside any function call (e.g. OBJECT_CONSTRUCT(*), TO_JSON(*), ARRAY_CONSTRUCT(*), GET(OBJECT_CONSTRUCT(*), ...)). COUNT(*) is the only allowed star-in-function.
+- \`IDENTIFIER('<anything>')\` and any other runtime-resolved identifier function.
+- Positional column references: \`$1\`, \`$2\`, \`$3\`, … Always reference columns by name.
+- \`SELECT * EXCLUDE(...)\` / \`SELECT * REPLACE(...)\`.
+- Any column or table not listed in the ONTOLOGY CONTEXT above.
+If the user's question would require any of these, respond with "ERROR:" and a one-line explanation instead of SQL.
+
 OUTPUT:
 Return ONLY the raw SQL query — no markdown fences, no explanation.
 If the question cannot be answered with the provided tables, start your response with "ERROR:" and explain what is missing.`;

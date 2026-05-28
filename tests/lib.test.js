@@ -22,6 +22,7 @@ import {
   DEFAULT_EMBED_MODEL,
   CLICKHOUSE_REFUSAL_ERROR,
 } from '../src/lib.js';
+import { SYSTEM_PROMPT } from '../src/compile.js';
 
 // =======================================================================
 // Constants
@@ -41,6 +42,42 @@ test('DEFAULT_CHAT_MODEL is gpt-5.4 (not gpt-4o)', () => {
 
 test('DEFAULT_EMBED_MODEL is text-embedding-3-small (matches MCP)', () => {
   assert.equal(DEFAULT_EMBED_MODEL, 'text-embedding-3-small');
+});
+
+// =======================================================================
+// SYSTEM_PROMPT — Round 9 forbidden-constructs block (V29 defense-in-depth)
+// =======================================================================
+//
+// The MCP-side SQL validator is the load-bearing barrier against
+// OBJECT_CONSTRUCT(*), IDENTIFIER(...), and $N positional refs. These
+// assertions lock the system prompt so a future edit doesn't accidentally
+// remove the LLM-side guard, which would re-open the easy prompt-injection
+// path even though the validator would still catch the resulting SQL.
+
+test('SYSTEM_PROMPT contains FORBIDDEN CONSTRUCTS block (R9 V29)', () => {
+  const prompt = SYSTEM_PROMPT('snowflake');
+  assert.match(prompt, /FORBIDDEN CONSTRUCTS/);
+});
+
+test('SYSTEM_PROMPT forbids OBJECT_CONSTRUCT(*) (R9 V26)', () => {
+  const prompt = SYSTEM_PROMPT('snowflake');
+  assert.match(prompt, /OBJECT_CONSTRUCT\(\*\)/);
+});
+
+test('SYSTEM_PROMPT forbids IDENTIFIER() (R9 V27)', () => {
+  const prompt = SYSTEM_PROMPT('snowflake');
+  assert.match(prompt, /IDENTIFIER\('<anything>'\)/);
+});
+
+test('SYSTEM_PROMPT forbids $N positional refs (R9 V28)', () => {
+  const prompt = SYSTEM_PROMPT('snowflake');
+  assert.match(prompt, /Positional column references/);
+  assert.match(prompt, /\$1/);
+});
+
+test('SYSTEM_PROMPT still allows COUNT(*) as the only star-in-function exception', () => {
+  const prompt = SYSTEM_PROMPT('snowflake');
+  assert.match(prompt, /COUNT\(\*\) is the only allowed/i);
 });
 
 // =======================================================================
