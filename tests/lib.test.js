@@ -86,6 +86,24 @@ test('SYSTEM_PROMPT forbids double-quoted bareword identifiers (R10 V32)', () =>
   assert.match(prompt, /"COLUMN_NAME"/);
 });
 
+test('SYSTEM_PROMPT forbids colon/bracket semi-structured paths (R11-2)', () => {
+  const prompt = SYSTEM_PROMPT('snowflake');
+  assert.match(prompt, /[Ss]emi-structured path access/);
+  assert.match(prompt, /col:key/);
+});
+
+test('SYSTEM_PROMPT still allows :: type casts (R11-2 no false positive)', () => {
+  const prompt = SYSTEM_PROMPT('snowflake');
+  assert.match(prompt, /col::DATE/);
+});
+
+test('SYSTEM_PROMPT forbids PIVOT/UNPIVOT/FLATTEN (R11-3)', () => {
+  const prompt = SYSTEM_PROMPT('snowflake');
+  assert.match(prompt, /PIVOT/);
+  assert.match(prompt, /UNPIVOT/);
+  assert.match(prompt, /FLATTEN/);
+});
+
 // =======================================================================
 // Pure helpers
 // =======================================================================
