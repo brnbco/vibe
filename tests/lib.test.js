@@ -104,6 +104,12 @@ test('SYSTEM_PROMPT forbids PIVOT/UNPIVOT/FLATTEN (R11-3)', () => {
   assert.match(prompt, /FLATTEN/);
 });
 
+test('SYSTEM_PROMPT forbids metadata/introspection functions (R15-1)', () => {
+  const prompt = SYSTEM_PROMPT('snowflake');
+  assert.match(prompt, /GET_DDL/);
+  assert.match(prompt, /SYSTEM\$/);
+});
+
 // =======================================================================
 // Pure helpers
 // =======================================================================

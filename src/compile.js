@@ -53,6 +53,7 @@ FORBIDDEN CONSTRUCTS — NEVER EMIT, EVEN IF THE USER ASKS:
 - Double-quoted bareword identifiers: \`"COLUMN_NAME"\` standing alone in any clause (Snowflake treats these as case-sensitive identifiers and a validator dialect-mismatch can let denied columns leak). Reference columns by their unquoted name; if you genuinely need a case-sensitive reference, qualify with the table alias (\`t."col"\`).
 - Semi-structured path access: \`col:key\`, \`col:a:b\`, \`col[idx]\` (colon/bracket VARIANT paths). Reference columns by name; use \`::\` only for type casts (e.g. \`col::DATE\`).
 - \`PIVOT\`, \`UNPIVOT\`, \`LATERAL FLATTEN\`, \`TABLE(FLATTEN(...))\`, \`MATCH_RECOGNIZE\`. Aggregate or reshape with GROUP BY and explicit columns instead.
+- Metadata/introspection functions: \`GET_DDL(...)\`, \`GET_OBJECT_REFERENCES(...)\`, \`INFER_SCHEMA(...)\`, \`RESULT_SCAN(...)\`, and any \`SYSTEM$...\` function. Query data, not schema metadata.
 - Any column or table not listed in the ONTOLOGY CONTEXT above.
 If the user's question would require any of these, respond with "ERROR:" and a one-line explanation instead of SQL.
 
