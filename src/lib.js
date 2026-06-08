@@ -181,7 +181,7 @@ function searchTokenize(text) {
   return text.toLowerCase().replace(/[^a-z0-9]+/g, ' ').split(/\s+/).filter(t => t.length > 2);
 }
 
-function keywordBoost(match, queryTokens) {
+function keywordBoost(match, queryTokens, boostWeight = KEYWORD_BOOST) {
   const haystack = [match.database, match.schema, match.table]
     .join(' ').toLowerCase().replace(/[^a-z0-9]+/g, ' ');
 
@@ -189,7 +189,7 @@ function keywordBoost(match, queryTokens) {
   for (const token of queryTokens) {
     if (haystack.includes(token)) hits++;
   }
-  return hits > 0 ? (hits / queryTokens.length) * KEYWORD_BOOST : 0;
+  return hits > 0 ? (hits / queryTokens.length) * boostWeight : 0;
 }
 
 function detectDatasets(queryTokens, semanticMatches) {
@@ -226,7 +226,87 @@ function pineconeMatchToResult(m) {
 }
 
 /**
+ * Backend-agnostic ontology search + rerank. The vector-store specifics
+ * (embedding, semantic query, per-dataset filtered query) are injected so the
+ * SAME keyword-boost + dataset-detection + score-floor rerank pipeline serves
+ * every backend (Pinecone, Vertex VS 2.0, …). One reranker, many backends.
+ *
+ * Score scales differ per backend (Pinecone returns cosine ~0–1; VS 2.0
+ * returns `1 - distance`), so `scoreFloor` and `keywordBoostWeight` are
+ * per-backend tunables — never hardcode the Pinecone constants for another store.
+ *
+ * @param {object} args
+ * @param {(query:string)=>Promise<number[]>} args.embedQuery
+ * @param {(vector:number[], k:number)=>Promise<Array>} args.semanticSearch
+ *        Returns raw matches; each carries {id, score} plus either top-level
+ *        {database,schema,table,kind,ddl} or a {metadata:{…}} object.
+ * @param {(vector:number[], schema:string, k:number)=>Promise<Array>} [args.datasetSearch]
+ *        Optional schema-filtered fetch. Omit to disable dataset detection.
+ * @param {(m:object)=>object} [args.toResult] - raw→result normalizer
+ * @param {string} args.query
+ * @param {number} [args.topK=5]
+ * @param {number} [args.scoreFloor=0.40]
+ * @param {number} [args.keywordBoostWeight=0.15]
+ * @returns {Promise<Array>}
+ */
+export async function searchOntologyGeneric({
+  embedQuery,
+  semanticSearch,
+  datasetSearch,
+  toResult = pineconeMatchToResult,
+  query,
+  topK = 5,
+  scoreFloor = DATASET_SCORE_FLOOR,
+  keywordBoostWeight = KEYWORD_BOOST,
+}) {
+  const vector = await embedQuery(query);
+
+  const matches = (await semanticSearch(vector, topK * FETCH_MULTIPLIER)) || [];
+  const queryTokens = searchTokenize(query);
+
+  const detectedDatasets = datasetSearch ? detectDatasets(queryTokens, matches) : [];
+
+  let datasetMatches = [];
+  if (detectedDatasets.length > 0) {
+    const dsResults = await Promise.all(
+      detectedDatasets.map((schema) => datasetSearch(vector, schema, 20)),
+    );
+    for (const res of dsResults) datasetMatches.push(...(res || []));
+  }
+
+  const seen = new Map();
+
+  for (const m of matches) {
+    const r = toResult(m);
+    r.score = m.score + keywordBoost(
+      { database: r.database, schema: r.schema, table: r.table }, queryTokens, keywordBoostWeight,
+    );
+    seen.set(r.id, r);
+  }
+
+  for (const m of datasetMatches) {
+    if (seen.has(m.id)) continue;
+    const r = toResult(m);
+    r.score = Math.max(m.score, scoreFloor) + keywordBoost(
+      { database: r.database, schema: r.schema, table: r.table }, queryTokens, keywordBoostWeight,
+    );
+    seen.set(r.id, r);
+  }
+
+  const all = [...seen.values()];
+  all.sort((a, b) => b.score - a.score);
+
+  const adjustedTopK = detectedDatasets.length > 0
+    ? Math.max(topK, topK + datasetMatches.filter(m => !matches.find(s => s.id === m.id)).length)
+    : topK;
+
+  return all.slice(0, Math.min(adjustedTopK, topK + 5));
+}
+
+/**
  * Semantic + keyword + dataset-aware search over a Pinecone index/namespace.
+ * Thin wrapper that injects Pinecone-specific fetchers into
+ * {@link searchOntologyGeneric}. Uses the Pinecone-tuned cosine constants.
  *
  * @param {object} args
  * @param {object} args.pinecone - Pinecone client (pinecone.index(name).namespace(ns).query(...))
@@ -251,66 +331,26 @@ export async function searchOntologyWithClients({
 }) {
   const idx = pinecone.index(indexName).namespace(namespace);
 
-  const resp = await openai.embeddings.create({
-    model: embedModel,
-    input: query,
+  return searchOntologyGeneric({
+    query,
+    topK,
+    embedQuery: async (q) => {
+      const resp = await openai.embeddings.create({ model: embedModel, input: q });
+      return resp.data[0].embedding;
+    },
+    semanticSearch: async (vector, k) => {
+      const req = { vector, topK: k, includeMetadata: true };
+      if (filter) req.filter = filter;
+      const res = await idx.query(req);
+      return res.matches || [];
+    },
+    datasetSearch: async (vector, schema, k) => {
+      const req = { vector, topK: k, includeMetadata: true, filter: { schema: { $eq: schema } } };
+      if (filter) req.filter = { ...filter, schema: { $eq: schema } };
+      const res = await idx.query(req);
+      return res.matches || [];
+    },
   });
-  const vector = resp.data[0].embedding;
-
-  const semanticReq = {
-    vector,
-    topK: topK * FETCH_MULTIPLIER,
-    includeMetadata: true,
-  };
-  if (filter) semanticReq.filter = filter;
-
-  const semanticResults = await idx.query(semanticReq);
-
-  const queryTokens = searchTokenize(query);
-  const matches = semanticResults.matches || [];
-
-  const detectedDatasets = detectDatasets(queryTokens, matches);
-
-  let datasetMatches = [];
-  if (detectedDatasets.length > 0) {
-    const fetches = detectedDatasets.map(schema => {
-      const dsReq = { vector, topK: 20, filter: { schema: { $eq: schema } }, includeMetadata: true };
-      if (filter) dsReq.filter = { ...filter, schema: { $eq: schema } };
-      return idx.query(dsReq);
-    });
-    const dsResults = await Promise.all(fetches);
-    for (const res of dsResults) {
-      datasetMatches.push(...(res.matches || []));
-    }
-  }
-
-  const seen = new Map();
-
-  for (const m of matches) {
-    const r = pineconeMatchToResult(m);
-    r.score = m.score + keywordBoost(
-      { database: r.database, schema: r.schema, table: r.table }, queryTokens,
-    );
-    seen.set(r.id, r);
-  }
-
-  for (const m of datasetMatches) {
-    if (seen.has(m.id)) continue;
-    const r = pineconeMatchToResult(m);
-    r.score = Math.max(m.score, DATASET_SCORE_FLOOR) + keywordBoost(
-      { database: r.database, schema: r.schema, table: r.table }, queryTokens,
-    );
-    seen.set(r.id, r);
-  }
-
-  const all = [...seen.values()];
-  all.sort((a, b) => b.score - a.score);
-
-  const adjustedTopK = detectedDatasets.length > 0
-    ? Math.max(topK, topK + datasetMatches.filter(m => !matches.find(s => s.id === m.id)).length)
-    : topK;
-
-  return all.slice(0, Math.min(adjustedTopK, topK + 5));
 }
 
 // =====================================================================

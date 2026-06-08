@@ -2,6 +2,10 @@ import OpenAI from 'openai';
 import { getConfig } from './config.js';
 
 const MAX_COLUMNS_PER_TABLE = 30;
+// Each query-keyword match is worth this much; the data-presence signal is
+// worth 1. KEYWORD_WEIGHT must exceed the data bonus so any single keyword
+// match beats a column that merely has profile data.
+const KEYWORD_WEIGHT = 10;
 
 export const DIALECT_HINTS = {
   snowflake: `TARGET DIALECT: Snowflake SQL
@@ -121,7 +125,13 @@ export function filterColumns(ddl, queryTokens) {
     const structural = isStructuralColumn(name, type);
     const isNumCol = /nonzero_rows=\d/.test(line);
     const hasData = isNumCol || /nonnull_rows=\d/.test(line);
-    const keywordScore = scoreColumn(name, queryTokens) + (hasData ? 3 : 0);
+    // Query relevance MUST dominate data-presence. A column that matches the
+    // user's question outranks any unrelated-but-profiled column; data
+    // presence only breaks ties between columns of equal keyword relevance.
+    // (Prior code added a flat +3 for hasData, which let unrelated profiled
+    // columns evict single-keyword-match columns and silently drop the column
+    // the user actually asked for.)
+    const keywordScore = scoreColumn(name, queryTokens) * KEYWORD_WEIGHT + (hasData ? 1 : 0);
     const dataVolume = parseDataVolume(line);
     return { line, name, structural, keywordScore, dataVolume, isNumCol };
   });

@@ -11,6 +11,7 @@ import {
   compileSQLWithClient,
   recompileSQLWithClient,
   searchOntologyWithClients,
+  searchOntologyGeneric,
   buildProfileSqlForBigQuery,
   buildProfileSqlForSnowflake,
   buildDateWindowWhere,
@@ -160,6 +161,25 @@ test('filterColumns reduces wide tables but always keeps structural columns', ()
   assert.match(out, /order_date \(DATE\)/);
   assert.match(out, /customer_id \(STRING\)/);
   assert.match(out, /less-relevant columns omitted/);
+});
+
+test('filterColumns keeps a keyword-matched column over unrelated profiled columns', () => {
+  // Regression (2026-06-08): on a wide table, a flat +3 "has profile data"
+  // bonus let unrelated-but-profiled columns evict the column the user
+  // actually asked for. Query relevance must win.
+  const lines = ['Table: db.s.t', 'Type: BASE TABLE'];
+  // 40 unrelated numeric columns that all carry profile data (+ would-be bonus).
+  for (let i = 0; i < 40; i++) {
+    lines.push(`  - unrelated_${i} (NUMBER) e.g. 1, nonzero_rows=${1000 + i}`);
+  }
+  // The relevant column matches the query keywords but has NO profile data.
+  lines.push('  - Purchases_Conversion_Value__Facebook_Ads (NUMBER)');
+  const ddl = lines.join('\n');
+
+  const queryTokens = expandQueryTokens(tokenize('oats overnight facebook roas conversion'));
+  const out = filterColumns(ddl, queryTokens);
+
+  assert.match(out, /Purchases_Conversion_Value__Facebook_Ads/);
 });
 
 test('buildCompilerContext joins multiple table contexts', () => {
@@ -573,4 +593,52 @@ test('searchOntologyWithClients respects custom topK', async () => {
     topK: 3,
   });
   assert.equal(out.length, 3);
+});
+
+// =======================================================================
+// searchOntologyGeneric — backend-agnostic DI reranker (VS 2.0 + Pinecone)
+// =======================================================================
+
+test('searchOntologyGeneric applies keyword boost via injected fetchers', async () => {
+  // Simulates a non-Pinecone backend (e.g. VS 2.0): low cosine scores,
+  // keyword boost must still float the relevant table to the top.
+  const hits = [
+    { id: 'db.public.foo', score: 0.37, metadata: { database: 'db', schema: 'public', table: 'foo', kind: 'TABLE', ddl: 'X' } },
+    { id: 'db.public.bar_revenue', score: 0.36, metadata: { database: 'db', schema: 'public', table: 'bar_revenue', kind: 'TABLE', ddl: 'Y' } },
+  ];
+  const out = await searchOntologyGeneric({
+    query: 'revenue',
+    topK: 5,
+    embedQuery: async () => new Array(3072).fill(0.1),
+    semanticSearch: async () => hits,
+    // VS 2.0-tuned constants (lower base scores than Pinecone)
+    scoreFloor: 0.25,
+    keywordBoostWeight: 0.15,
+  });
+  assert.equal(out.length, 2);
+  assert.equal(out[0].id, 'db.public.bar_revenue');
+});
+
+test('searchOntologyGeneric dataset detection floors a schema-only match into topK', async () => {
+  // semanticSearch misses the low-scoring same-schema table; the injected
+  // datasetSearch (schema-filtered) recovers it and the floor lifts it.
+  const semantic = [
+    { id: 'oats.oats_overnight.facebook2', score: 0.30, metadata: { database: 'oats', schema: 'oats_overnight', table: 'facebook2', kind: 'TABLE', ddl: 'A' } },
+  ];
+  const datasetOnly = [
+    { id: 'oats.oats_overnight.tiktok', score: 0.02, metadata: { database: 'oats', schema: 'oats_overnight', table: 'tiktok', kind: 'TABLE', ddl: 'B' } },
+  ];
+  let datasetCalledWith = null;
+  const out = await searchOntologyGeneric({
+    query: 'oats overnight',
+    topK: 5,
+    embedQuery: async () => [0.1, 0.2],
+    semanticSearch: async () => semantic,
+    datasetSearch: async (_vec, schema) => { datasetCalledWith = schema; return datasetOnly; },
+    scoreFloor: 0.25,
+    keywordBoostWeight: 0.15,
+  });
+  assert.equal(datasetCalledWith, 'oats_overnight');
+  const ids = out.map((m) => m.id);
+  assert.ok(ids.includes('oats.oats_overnight.tiktok'), 'dataset-only table must be recovered');
 });
