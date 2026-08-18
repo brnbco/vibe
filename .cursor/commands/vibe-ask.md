@@ -1,6 +1,6 @@
 # vibe-ask
 
-you must follow current networking, infrastructure, and security patterns as current features. you must consider the data model.
+you must follow current networking, infrastructure, and security patterns as current features. you must consider the data model, and core-considerations.
 
 YOU MUST PROVE ALL ASSUMPTIONS. DO NOT GUESS.
 
