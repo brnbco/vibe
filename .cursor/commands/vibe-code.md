@@ -6,6 +6,6 @@ unless explicitly instructed otherwise: you must use test-driven development app
 
 ---
 
-if slack mcp is available you must send frequent slack message embeds with status/progress updates and final results (even if have to stop) to channel id `` (these should be tweet length but use emojis).
+YOU MUST PROVE ALL ASSUMPTIONS. DO NOT GUESS.
 
 you must follow the rules in relative `.vibemd/RULES.md`.
