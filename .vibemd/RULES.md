@@ -229,6 +229,22 @@ git commit -m "docs: add execution discipline rules"
 
 ---
 
+## 🧭 Core Considerations
+
+* Maintain `.vibemd/CORE-CONSIDERATIONS.md` as the **cross-cutting feature implementation checklist**.
+* Before implementing or materially changing a feature, review it to identify applicable concerns beyond the immediate code change.
+* Use it to capture recurring considerations such as feature completeness, state/lifecycle, UX, data impact, permissions, integrations, observability, failure handling, and operational impact.
+* Not every consideration applies to every feature; determine applicability deliberately rather than implementing unnecessary complexity.
+* Update it whenever a new **project-wide implementation consideration** is discovered that should consistently influence future feature work.
+
+Commit example:
+
+```sh
+git commit -m "docs: add core considerations for feature development"
+```
+
+---
+
 ## ✅ Summary
 
 This repo prioritizes:
