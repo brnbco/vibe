@@ -1,4 +1,7 @@
-# vibe-code
+---
+name: vibe-code
+description: Implement code changes using test-driven development. Run and pass all unit, integration, and e2e tests locally before and after implementation, write new tests for new features and bug fixes, and prove all assumptions.
+---
 
 you must follow current networking, infrastructure, and security patterns as current features. you must consider the data model.
 

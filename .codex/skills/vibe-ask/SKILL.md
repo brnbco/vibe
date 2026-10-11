@@ -1,4 +1,7 @@
-# vibe-ask
+---
+name: vibe-ask
+description: Answer high-level architecture/design questions without writing or deploying code. Prove all assumptions, consider the data model, follow current networking/infrastructure/security patterns, MVP only.
+---
 
 you must follow current networking, infrastructure, and security patterns as current features. you must consider the data model.
 
